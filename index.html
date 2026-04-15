@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>App Auditoría - Genomma Lab</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+
+  <div class="app-container">
+    <header class="app-header">
+      <h1 id="header-title">Auditoría Diaria</h1>
+    </header>
+
+    <main class="app-content">
+      
+      <!-- PANTALLA: AUDITORÍA -->
+      <section id="view-audit" class="view active">
+        <div class="card">
+          <label><i class="fas fa-truck"></i> Distribuidor</label>
+          <select id="distribuidor" onchange="actualizarDependenciasAudit()"></select>
+          
+          <label><i class="fas fa-user-tie"></i> Vendedor Asignado</label>
+          <select id="vendedor" onchange="verificarEvaluacionDiaria()"></select>
+          
+          <div id="alerta-compromisos" class="alerta-amarilla" style="display:none;"></div>
+          
+          <label><i class="fas fa-map-marker-alt"></i> Zona o Barrio</label>
+          <input type="text" id="zona" placeholder="Ej: Centro, Norte">
+          
+          <label><i class="fas fa-store"></i> Nombre de la Tienda</label>
+          <input type="text" id="tienda" placeholder="Ej: Tienda La 24">
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-tags"></i> Censo de Marcas</h3>
+          <div id="marcas-senso" class="check-list"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-box-open"></i> Material POP (Plus)</h3>
+          <p class="subtitle" style="color:var(--primary);">No afecta la métrica. Es un logro adicional.</p>
+          <div id="pop-container" class="check-list"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-star-half-alt"></i> Evaluación del Vendedor</h3>
+          <div id="bloque-diario" style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px dashed #ccc;">
+            <p class="subtitle" style="color:var(--primary); font-weight:bold; margin-bottom:5px;"><i class="fas fa-sun"></i> Evaluación Diaria (1 vez por día)</p>
+            <div id="eval-diaria-container" class="check-list"></div>
+            <div id="msg-eval-diaria" class="msg-exito" style="display:none;"></div>
+          </div>
+          <div id="bloque-visita">
+            <p class="subtitle" style="color:var(--eval); font-weight:bold; margin-bottom:5px;"><i class="fas fa-store-alt"></i> Evaluación en esta Tienda</p>
+            <div id="eval-visita-container" class="check-list"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-camera"></i> Auditoría Visual y Evidencia</h3>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <label for="foto-input" class="btn-primary" style="flex:1; text-align:center; background:#17a2b8; padding:10px; cursor:pointer;">
+              <i class="fas fa-camera"></i> Capturar
+            </label>
+            <input type="file" id="foto-input" accept="image/*" capture="environment" style="display:none;" onchange="procesarFoto(event)">
+            <button id="btn-ia-foto" class="btn-primary" style="flex:1; background:#673AB7; padding:10px; display:none;" onclick="analizarFotoIA()">
+              <i class="fas fa-magic"></i> Evaluar Foto
+            </button>
+          </div>
+          <div id="foto-preview-container" style="display:none; margin-top:15px; text-align:center;">
+             <img id="foto-preview" style="max-width:100%; border-radius:8px; max-height:200px; object-fit:cover; border:2px solid #ccc;">
+          </div>
+          <div id="box-ia-foto" class="ai-report-box" style="display:none; margin-top:10px; text-align:left;"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-user-secret"></i> Inteligencia y Novedades</h3>
+          <div style="display:flex; gap:10px; align-items:flex-start;">
+            <textarea id="notas-visita" rows="3" placeholder="Ej: Pepsi bajó precio. Dictale a la app:" style="flex:1; width:100%; border-radius:8px; padding:10px; border:1px solid #ccc;"></textarea>
+            <button id="btn-mic" class="btn-icon" style="background:#dc3545; height:45px;" onclick="iniciarDictado('notas-visita', 'btn-mic')">
+              <i class="fas fa-microphone"></i>
+            </button>
+          </div>
+        </div>
+
+        <button id="btn-guardar" class="btn-primary" onclick="guardarVisita()">
+          <i class="fas fa-save"></i> Guardar Registro Definitivo
+        </button>
+      </section>
+
+      <!-- PANTALLA: CALENDARIO / HISTORIAL -->
+      <section id="view-calendar" class="view">
+        <div class="tabs-internos">
+          <button id="tab-historial" class="tab-btn active" onclick="cambiarVistaCalendario('historial')">Historial App</button>
+          <button id="tab-google" class="tab-btn" onclick="cambiarVistaCalendario('google')">Google Calendar</button>
+        </div>
+
+        <div id="contenedor-historial">
+          <div class="card">
+            <label style="color:#333; font-weight:bold;"><i class="fas fa-search"></i> Buscar registros del pasado:</label>
+            <div style="display:flex; gap:10px; margin-top:5px;">
+              <input type="date" id="fecha-filtro" onchange="mostrarRegistrosPorFecha()" style="flex:1;">
+              <button class="btn-excel" onclick="exportarExcel()" title="Exportar a Excel"><i class="fas fa-file-excel"></i> CSV</button>
+            </div>
+          </div>
+          <div id="lista-registros"></div>
+        </div>
+        <div id="contenedor-google" style="display: none;">
+          <div class="card" style="padding:0; overflow:hidden;" id="gcal-iframe-container"></div>
+        </div>
+      </section>
+
+      <!-- PANTALLA: ESTADÍSTICAS Y POWER BI -->
+      <section id="view-stats" class="view">
+        <div class="card" style="background: #eef2f3; border: 1px solid #d0d7de;">
+          <label style="color:var(--primary); font-weight:bold;"><i class="fas fa-filter"></i> Filtrar Análisis:</label>
+          <select id="tipo-filtro-stats" onchange="cambiarFiltroStats()" style="margin-bottom: 10px;">
+            <option value="hoy">Día Específico</option>
+            <option value="mes">Por Mes (Compara vs Anterior)</option>
+            <option value="rango">Rango de Fechas</option>
+            <option value="ytd">Acumulado del Año (YTD)</option>
+          </select>
+          <div id="filtro-inputs-container" style="display:flex; gap:10px;">
+            <input type="date" id="filtro-stat-dia" onchange="actualizarEstadisticas()">
+            <input type="month" id="filtro-stat-mes" onchange="actualizarEstadisticas()" style="display:none;">
+            <input type="date" id="filtro-stat-inicio" onchange="actualizarEstadisticas()" style="display:none;">
+            <input type="date" id="filtro-stat-fin" onchange="actualizarEstadisticas()" style="display:none;">
+          </div>
+        </div>
+
+        <div class="card" style="text-align:center; background:#f3e5f5; border:1px solid #ce93d8;">
+          <h4 style="color:#673AB7; margin-bottom:10px;"><i class="fas fa-envelope-open-text"></i> Reporte para Gerencia</h4>
+          <button id="btn-reporte-gerencia" class="btn-primary" style="background:#673AB7; padding:10px; font-size:1rem;" onclick="generarReporteGerencial()">
+            <i class="fas fa-magic"></i> Redactar Resumen
+          </button>
+          <div id="box-reporte-gerencia" class="ai-report-box" style="display:none; margin-top:15px; text-align:left;"></div>
+        </div>
+
+        <div class="tabs-internos">
+          <button id="tab-stat-dash" class="tab-btn active" onclick="cambiarVistaStats('dashboard')">KPI</button>
+          <button id="tab-stat-clasico" class="tab-btn" onclick="cambiarVistaStats('clasico')">Clásico</button>
+          <button id="tab-stat-powerbi" class="tab-btn" onclick="cambiarVistaStats('powerbi')">Power BI</button>
+        </div>
+
+        <div id="stats-dashboard">
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <i class="fas fa-store kpi-icon text-primary"></i>
+              <div class="kpi-num" id="kpi-tiendas">0</div>
+              <div class="kpi-label">Tiendas</div>
+              <div id="trend-tiendas" class="trend-badge"></div>
+            </div>
+            <div class="kpi-card">
+              <i class="fas fa-bullseye kpi-icon" style="color: var(--eval);"></i>
+              <div class="kpi-num" id="kpi-tacticas">0%</div>
+              <div class="kpi-label">Efectividad</div>
+              <div id="trend-tacticas" class="trend-badge"></div>
+            </div>
+          </div>
+          <div class="card"><h5 class="chart-title">Presencia de Marcas</h5><div class="chart-container"><canvas id="chartMarcas"></canvas></div></div>
+          <div class="card"><h5 class="chart-title" style="color: var(--eval);">Tácticas en Tienda</h5><div class="chart-container" style="height: 250px;"><canvas id="chartTacticas"></canvas></div></div>
+          <div class="card"><h5 class="chart-title">Evaluación Diaria (Presentación)</h5><div class="chart-container" style="height: 220px;"><canvas id="chartDiaria"></canvas></div></div>
+        </div>
+
+        <div id="stats-clasico" class="card" style="display: none;"><div id="stats-container"></div></div>
+        
+        <div id="stats-powerbi" style="display: none;">
+          <div class="card" style="padding: 0; overflow: hidden; height: 60vh; border-radius: 15px;">
+            <iframe title="Reporte Ventas Distribuidoras" width="100%" height="100%" src="https://app.powerbi.com/view?r=..." frameborder="0" allowFullScreen="true"></iframe>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANTALLA: DIRECTORIO (CONTACTOS Y CRM) -->
+      <section id="view-directorio" class="view">
+        <div class="tabs-internos" style="margin-bottom:15px;">
+          <button id="tab-dir-vend" class="tab-btn active" onclick="cambiarVistaDir('vendedores')">📞 Contactos</button>
+          <button id="tab-dir-dist" class="tab-btn" onclick="cambiarVistaDir('distribuidores')">🏢 Directorio CRM</button>
+        </div>
+        
+        <!-- Botones de creación rápida -->
+        <div style="display:flex; gap:10px; margin-bottom:15px;">
+          <button class="btn-primary" style="flex:1; background:#28a745; padding:10px; font-size:0.9rem;" onclick="switchTab('view-settings', 'Configuración'); setTimeout(()=>document.getElementById('config-vend-nombre').focus(), 300);"><i class="fas fa-user-plus"></i> Nuevo Contacto</button>
+          <button class="btn-primary" style="flex:1; background:#673AB7; padding:10px; font-size:0.9rem;" onclick="switchTab('view-settings', 'Configuración'); setTimeout(()=>document.getElementById('config-dist-nombre').focus(), 300);"><i class="fas fa-truck"></i> Nueva Empresa</button>
+        </div>
+
+        <div class="card">
+          <input type="text" id="buscar-directorio" placeholder="Buscar por nombre o empresa..." onkeyup="renderizarDirectorio()" style="margin-bottom:5px;">
+        </div>
+        
+        <!-- Listado de Contactos (Vendedores + Supervisores) -->
+        <div id="lista-directorio-vendedores"></div>
+        
+        <!-- Listado CRM (Distribuidores y Acordeones) -->
+        <div id="lista-directorio-distribuidores" style="display:none;"></div>
+      </section>
+
+      <!-- PANTALLA: ASISTENTE VIRTUAL (NOTAS DE VOZ IA) -->
+      <section id="view-voice" class="view">
+        <div class="card" style="text-align:center; padding:30px 15px;">
+          <h3 style="color:#673AB7; margin-bottom:5px;"><i class="fas fa-robot"></i> Asistente Virtual</h3>
+          <p class="subtitle" style="margin-bottom:25px;">Graba una nota, hazme una pregunta, o dime que te agende una reunión en el calendario.</p>
+          
+          <button id="btn-grabar-central" class="btn-voice" onclick="toggleGrabacionCentral()">
+            <i class="fas fa-microphone"></i>
+          </button>
+          <p id="status-grabacion" style="color:#dc3545; font-weight:bold; margin-top:15px; display:none;">🔴 Escuchando...</p>
+        </div>
+
+        <div id="panel-nota-nueva" class="card" style="display:none; border-top: 4px solid #673AB7;">
+          <h4 style="margin-bottom:10px;"><i class="fas fa-edit"></i> Tu Mensaje:</h4>
+          <textarea id="texto-nota-central" rows="4" style="width:100%; border-radius:8px; padding:10px; border:1px solid #ccc; margin-bottom:10px;" placeholder="Ej: Agendar reunión mañana a las 3pm con Juan..."></textarea>
+          
+          <div style="background:#f4f4f4; padding:10px; border-radius:8px; margin-bottom:15px;">
+            <label style="font-size:0.8rem; color:#666; margin-top:0;"><i class="fas fa-bell"></i> Calendario (Opcional - La IA lo deduce si no lo pones):</label>
+            <div style="display:flex; gap:10px; margin-top:5px; margin-bottom:10px;">
+              <input type="date" id="fecha-recordatorio" style="flex:1; padding:8px;">
+              <input type="time" id="hora-recordatorio" style="flex:1; padding:8px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <input type="checkbox" id="urgente-nota" style="width:20px; height:20px; accent-color:#dc3545;">
+              <label for="urgente-nota" style="margin:0; font-weight:bold; color:#dc3545;"><i class="fas fa-fire"></i> Marcar Urgente</label>
+            </div>
+          </div>
+
+          <button id="btn-procesar-nota-ia" class="btn-primary" style="background:#673AB7; padding:12px; font-size:1.05rem; margin-bottom:10px;" onclick="enviarAlAsistenteIA()">
+            <i class="fas fa-paper-plane"></i> Enviar al Asistente IA
+          </button>
+          
+          <div id="msg-ia-nota" style="text-align:center; color:#673AB7; font-size:0.9rem; display:none; margin-bottom:10px;"><i class="fas fa-spinner fa-spin"></i> Pensando...</div>
+          <div id="box-respuesta-asistente" style="display:none; background:#e8eaf6; padding:15px; border-radius:8px; border-left:4px solid #673AB7; margin-bottom:15px; font-size:0.95rem; color:#333;"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-list-ul"></i> Tus Notas Guardadas</h3>
+          <div id="lista-notas-central"></div>
+        </div>
+      </section>
+
+      <!-- PANTALLA: CONFIGURACIÓN -->
+      <section id="view-settings" class="view">
+        
+        <div class="card">
+          <h3><i class="fas fa-truck"></i> Ficha Distribuidores</h3>
+          <p class="subtitle">Llena los datos corporativos aquí.</p>
+          <input type="text" id="config-dist-nombre" placeholder="Nombre Distribuidora" style="margin-bottom:8px; font-weight:bold;">
+          <input type="text" id="config-dist-ciudad" placeholder="Ciudad o Región" style="margin-bottom:8px;">
+          <input type="text" id="config-dist-direccion" placeholder="Dirección" style="margin-bottom:8px;">
+          <div style="display:flex; gap:10px; margin-bottom:8px;">
+            <input type="number" id="config-dist-vendedores" placeholder="Nº Vendedores" style="flex:1;">
+            <input type="number" id="config-dist-clientes" placeholder="Nº Clientes" style="flex:1;">
+          </div>
+          <div style="background:#f9f9f9; padding:10px; border-radius:8px; border:1px solid #ddd; margin-bottom:10px;">
+            <label style="margin-top:0; font-size:0.85rem; font-weight:bold; color:var(--primary);">Agregar Supervisor:</label>
+            <div style="display:flex; gap:5px; margin-top:5px;">
+              <input type="text" id="config-sup-nombre" placeholder="Nombre" style="flex:1; padding:8px;">
+              <input type="number" id="config-sup-tel" placeholder="Celular" style="flex:1; padding:8px;">
+              <button class="btn-icon add" onclick="addSupTemp()" style="height:auto; width:40px;"><i class="fas fa-plus"></i></button>
+            </div>
+            <div id="lista-sups-temp" style="margin-top:10px;"></div>
+          </div>
+          <button class="btn-primary" onclick="guardarDistribuidor()" style="margin-bottom:15px; padding:10px;"><i class="fas fa-save"></i> Guardar Distribuidor</button>
+          
+          <div id="lista-distribuidores-config" class="manage-list"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-users"></i> Gestión de Vendedores</h3>
+          <select id="config-vend-distri" style="margin-bottom:8px;"></select>
+          <input type="text" id="config-vend-nombre" placeholder="Nombre completo" style="margin-bottom:8px;">
+          <input type="number" id="config-vend-doc" placeholder="Cédula" style="margin-bottom:8px;">
+          <div style="display:flex; gap:5px; margin-bottom:8px;">
+            <input type="text" value="+57" disabled style="width:60px; background:#eee; text-align:center;">
+            <input type="number" id="config-vend-tel" placeholder="Celular" style="flex:1;">
+          </div>
+          <button class="btn-primary" onclick="agregarVendedor()" style="margin-bottom:15px; padding:10px;"><i class="fas fa-save"></i> Guardar Vendedor</button>
+          
+          <div id="lista-vendedores-config" class="manage-list"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-copyright"></i> Gestión de Marcas</h3>
+          <select id="config-marca-distri" style="margin-bottom:8px;"></select>
+          <div class="input-group">
+            <input type="text" id="nuevaMarca" placeholder="Nueva marca">
+            <button class="btn-icon add" onclick="agregarMarca()"><i class="fas fa-plus"></i></button>
+          </div>
+          <div id="lista-marcas-config" class="manage-list"></div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-brain" style="color:#673AB7;"></i> Motor IA (Gemini)</h3>
+          <div class="input-group">
+            <input type="password" id="gemini-key" placeholder="AIzaSy...">
+            <button class="btn-primary" style="width:auto; padding:12px; background:#673AB7;" onclick="guardarGemini()">Guardar</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fab fa-google"></i> Google Calendar</h3>
+          <div class="input-group">
+            <input type="text" id="gcal-id" placeholder="ID del calendario">
+            <button class="btn-primary" style="width:auto; padding:12px;" onclick="guardarGCal()">Guardar</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3><i class="fas fa-database"></i> Copia de Seguridad</h3>
+          <div style="display:flex; gap:10px;">
+            <button class="btn-primary" style="flex:1; background:#28a745; font-size:0.9rem;" onclick="exportarBackup()"><i class="fas fa-download"></i> Exportar</button>
+            <label for="import-backup" class="btn-primary" style="flex:1; background:#17a2b8; text-align:center; cursor:pointer; font-size:0.9rem; margin:0;"><i class="fas fa-upload"></i> Importar</label>
+            <input type="file" id="import-backup" accept=".json" style="display:none;" onchange="importarBackup(event)">
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- BOTÓN FLOTANTE (FAB) PARA NOTAS / ASISTENTE IA -->
+    <button id="fab-voice" class="fab-btn" onclick="switchTab('view-voice', 'Asistente IA', null)">
+      <i class="fas fa-microphone"></i>
+    </button>
+
+    <!-- NAVEGACIÓN INFERIOR CLÁSICA (5 BOTONES RESTAURADOS) -->
+    <nav class="bottom-nav">
+      <button class="nav-item active" onclick="switchTab('view-audit', 'Auditoría', this)"><i class="fas fa-clipboard-check"></i><span>Auditoría</span></button>
+      <button class="nav-item" onclick="switchTab('view-calendar', 'Historial', this)"><i class="fas fa-calendar-days"></i><span>Historial</span></button>
+      <button class="nav-item" onclick="switchTab('view-stats', 'Panel de Control', this)"><i class="fas fa-chart-pie"></i><span>Estadísticas</span></button>
+      <button class="nav-item" onclick="switchTab('view-directorio', 'Directorio', this)"><i class="fas fa-address-book"></i><span>Directorio</span></button>
+      <button class="nav-item" onclick="switchTab('view-settings', 'Configuración', this)"><i class="fas fa-cog"></i><span>Ajustes</span></button>
+    </nav>
+  </div>
+
+  <div id="toast-container"></div>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
