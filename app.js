@@ -1,0 +1,3022 @@
+// ==========================================
+// 1. CONFIGURACIÓN DE FIREBASE CLOUD
+// ==========================================
+// ⚠️ PEGA AQUÍ TU CÓDIGO DE FIREBASE ⚠️
+const firebaseConfig = {
+  apiKey: "TU_API_KEY",
+  authDomain: "tu-proyecto.firebaseapp.com",
+  projectId: "tu-proyecto",
+  storageBucket: "tu-proyecto.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef"
+};
+
+let db = null;
+try {
+  if (firebaseConfig.apiKey !== "TU_API_KEY") {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+  }
+} catch (e) {
+  console.log("Firebase no configurado. Trabajando en modo local.", e);
+}
+
+// ==========================================
+// 2. ESTADO GLOBAL Y ALMACENAMIENTO LOCAL
+// ==========================================
+let distriRaw = JSON.parse(localStorage.getItem("distribuidores")) || ["Distribuidora Central", "Aliados TAT"];
+// ATENCIÓN: El objeto Distribuidor ahora tiene un array para sus marcas asignadas ("marcasAsignadas")
+let distribuidores = distriRaw.map(d => typeof d === 'string' ? { 
+  id: Date.now() + Math.random(), 
+  nombre: d, 
+  ciudad: "", 
+  direccion: "", 
+  vendedores: "", 
+  clientes: "", 
+  supervisores: [],
+  marcasAsignadas: [] // Nueva propiedad relacional
+} : d);
+
+let vendedores = JSON.parse(localStorage.getItem("vendedoresObj")) || [];
+
+// Las marcas vuelven a ser solo Strings Globales
+let marcasRaw = JSON.parse(localStorage.getItem("marcas")) || ["Suerox", "Tío Nacho", "Cicatricure", "Xray", "Genoprazol", "Duracell"];
+let marcas = marcasRaw.map(m => typeof m === 'object' ? m.nombre : m);
+
+let visitas = JSON.parse(localStorage.getItem("visitas")) || [];
+let notasGlobales = JSON.parse(localStorage.getItem("notasGlobales")) || [];
+let googleCalendarId = localStorage.getItem("gcalId") || "";
+let geminiApiKey = localStorage.getItem("geminiKey") || ""; 
+
+// DATOS DE INICIO DE DÍA
+let datoDiario = JSON.parse(localStorage.getItem("datoDiario_" + new Date().toISOString().split('T')[0])) || null;
+
+// INFORMES GUARDADOS
+let informesGuardados = JSON.parse(localStorage.getItem("informesGuardados")) || [];
+
+// DATOS EDITABLES HISTORIAL (por sesion de distribuidor+vendedor+fecha)
+let datosHistorialEdit = JSON.parse(localStorage.getItem("datosHistorialEdit")) || {};
+
+// HUB DISTRIBUIDORES
+let tareasDistrib = JSON.parse(localStorage.getItem("tareasDistrib")) || {};
+let cuotasDistrib = JSON.parse(localStorage.getItem("cuotasDistrib")) || {};
+let incentivosDistrib = JSON.parse(localStorage.getItem("incentivosDistrib")) || {};
+let _periodoDistrib = 'semana';
+
+const materialesPOP = ["Pastillero Genomma", "Ganchera Pilas Duracell"];
+const aspectosDiarios = [ "Buena presentación personal (Uniforme)", "Porta herramientas (Catálogo/Tablet)" ];
+const aspectosVisita = [ "1. Saludo e introducción cordial", "2. Posicionamiento (Soluciones icónicas)", "3. Reconocimiento de Marcas", "4. Apertura comercial (Ayuda a ganar más)", "5. Despedida icónica" ];
+
+const getHoy = () => { 
+  const d = new Date(); 
+  return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().split('T')[0]; 
+};
+const getMesActual = () => getHoy().substring(0, 7); 
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('fecha-filtro').value = getHoy(); 
+  document.getElementById('filtro-stat-dia').value = getHoy();
+  document.getElementById('filtro-stat-mes').value = getMesActual(); 
+  document.getElementById('filtro-stat-inicio').value = getHoy(); 
+  document.getElementById('filtro-stat-fin').value = getHoy();
+  document.getElementById('filtro-informes-fecha') && (document.getElementById('filtro-informes-fecha').value = getHoy());
+  
+  if (!db) {
+    const statusEl = document.getElementById('nube-status');
+    if (statusEl) {
+      statusEl.innerHTML = '<i class="fas fa-mobile-alt"></i> Modo Local (Offline)';
+    }
+  }
+
+  // Restaurar estado del formulario al cargar (fix bug pérdida de datos)
+  restoreFormState();
+  
+  // Verificar si se deben hacer preguntas de inicio de día
+  setTimeout(verificarInicioDia, 500);
+  
+  // Agregar listeners de persistencia a todos los campos del formulario
+  ['zona', 'tienda', 'notas-visita'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', saveFormState);
+  });
+  ['distribuidor', 'vendedor'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', saveFormState);
+  });
+});
+
+let charInstanciaMarcas = null; 
+let charInstanciaTacticas = null; 
+let charInstanciaDiaria = null;
+let fotoBase64AI = null; 
+let fotoMinBase64 = null; 
+let supervisoresTemp = [];
+let voiceRecognition = null; 
+let isRecordingGlobal = false;
+
+// BANDERAS DE EDICIÓN
+let editandoDistribuidorId = null; 
+let editandoVendedorId = null;     
+
+// ==========================================
+// 3. SINCRONIZACIÓN EN TIEMPO REAL CON FIREBASE
+// ==========================================
+if (db) {
+  db.collection("distribuidores").onSnapshot((querySnapshot) => {
+    distribuidores = querySnapshot.docs.map(doc => doc.data());
+    localStorage.setItem("distribuidores", JSON.stringify(distribuidores));
+    renderizarApp();
+    const statusEl = document.getElementById('nube-status');
+    if (statusEl) {
+      statusEl.innerHTML = '<i class="fas fa-check-circle"></i> Sincronizado a la nube';
+    }
+  });
+
+  db.collection("vendedores").onSnapshot((querySnapshot) => {
+    vendedores = querySnapshot.docs.map(doc => doc.data());
+    localStorage.setItem("vendedoresObj", JSON.stringify(vendedores));
+    renderizarApp();
+  });
+
+  db.collection("marcas").doc("globales").onSnapshot((doc) => {
+    if (doc.exists) {
+      marcas = doc.data().lista || [];
+      localStorage.setItem("marcas", JSON.stringify(marcas));
+      renderizarApp();
+    }
+  });
+
+  db.collection("visitas").onSnapshot((querySnapshot) => {
+    visitas = querySnapshot.docs.map(doc => doc.data());
+    localStorage.setItem("visitas", JSON.stringify(visitas));
+    if (document.getElementById('view-calendar').classList.contains('active')) {
+      mostrarRegistrosPorFecha();
+    }
+    if (document.getElementById('view-stats').classList.contains('active')) {
+      actualizarEstadisticas();
+    }
+  });
+
+  db.collection("notas").onSnapshot((querySnapshot) => {
+    notasGlobales = querySnapshot.docs.map(doc => doc.data());
+    localStorage.setItem("notasGlobales", JSON.stringify(notasGlobales));
+    if (document.getElementById('view-voice').classList.contains('active')) {
+      renderizarNotasGlobales();
+    }
+  });
+}
+
+// ==========================================
+// 4. MIGRACIÓN DEL LOCALSTORAGE A LA NUBE
+// ==========================================
+async function migrarAFirebase() {
+  if (!db) {
+    return alert("Firebase no está configurado. Ve al archivo app.js e ingresa tu código de conexión.");
+  }
+  
+  if (!confirm("¿Deseas subir todos tus datos locales actuales a la Nube Firebase?")) {
+    return;
+  }
+  
+  try {
+    for (let d of distribuidores) {
+      await db.collection("distribuidores").doc(d.id.toString()).set(d);
+    }
+    for (let v of vendedores) { 
+      await db.collection("vendedores").doc(v.id.toString()).set(v); 
+    }
+    // Las marcas se guardan como un solo documento array
+    await db.collection("marcas").doc("globales").set({ lista: marcas });
+    
+    for (let v of visitas) { 
+      await db.collection("visitas").doc(v.id.toString()).set(v); 
+    }
+    for (let n of notasGlobales) { 
+      await db.collection("notas").doc(n.id.toString()).set(n); 
+    }
+    
+    alert("✅ ¡Éxito! Datos subidos a Firebase correctamente.");
+  } catch (error) {
+    alert("❌ Ocurrió un error migrando a la nube: " + error.message);
+  }
+}
+
+// ==========================================
+// 5. NAVEGACIÓN Y UTILIDADES
+// ==========================================
+function switchTab(tabId, title, btnElement) {
+  document.querySelectorAll('.view').forEach(view => {
+    view.classList.remove('active');
+  }); 
+  document.getElementById(tabId).classList.add('active');
+  
+  if (btnElement) {
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      btn.classList.remove('active');
+    }); 
+    btnElement.classList.add('active'); 
+  }
+  
+  if (title) {
+    document.getElementById('header-title').innerText = title;
+  }
+  
+  const btnFlotante = document.getElementById('fab-voice');
+  if (btnFlotante) {
+    btnFlotante.style.display = (tabId === 'view-voice' || tabId.includes('view-form')) ? 'none' : 'flex';
+  }
+  
+  if (tabId === 'view-calendar') {
+    mostrarRegistrosPorFecha();
+  }
+  if (tabId === 'view-stats') {
+    actualizarEstadisticas();
+  }
+  if (tabId === 'view-directorio') { 
+    cambiarVistaDir('vendedores'); 
+    renderizarDirectorio(); 
+  }
+  if (tabId === 'view-distrib') {
+    inicializarHubDistrib();
+  }
+  if (tabId === 'view-voice') { 
+    document.getElementById("panel-nota-nueva").style.display = "none"; 
+    document.getElementById("box-respuesta-asistente").style.display = "none"; 
+    renderizarNotasGlobales(); 
+  }
+  if (tabId === 'view-settings') { 
+    document.getElementById('gcal-id').value = googleCalendarId; 
+    document.getElementById('gemini-key').value = geminiApiKey; 
+  }
+  if (tabId === 'view-audit') {
+    actualizarDependenciasAudit();
+  }
+}
+
+function showToast(mensaje) {
+  const container = document.getElementById("toast-container"); 
+  const toast = document.createElement("div"); 
+  toast.className = "toast";
+  toast.innerHTML = `<i class="fas fa-check-circle" style="color:#28a745; margin-right:8px;"></i> ${mensaje}`; 
+  container.appendChild(toast); 
+  
+  setTimeout(() => {
+    toast.remove();
+  }, 3000);
+}
+
+// ==========================================
+// FORM STATE PERSISTENCE (Fix bug pérdida de datos)
+// ==========================================
+function saveFormState() {
+  try {
+    const state = {
+      distribuidor: document.getElementById('distribuidor')?.value || '',
+      vendedor: document.getElementById('vendedor')?.value || '',
+      zona: document.getElementById('zona')?.value || '',
+      tienda: document.getElementById('tienda')?.value || '',
+      notas: document.getElementById('notas-visita')?.value || '',
+      comproPorGenomma: document.getElementById('compro-genomma')?.checked || false,
+      comproPorDuracell: document.getElementById('compro-duracell')?.checked || false,
+      marcasCheck: {},
+      visitaCheck: {},
+      popCheck: {}
+    };
+    document.querySelectorAll('#marcas-senso input[type="checkbox"]').forEach(cb => {
+      state.marcasCheck[cb.dataset.marca] = cb.checked;
+    });
+    aspectosVisita.forEach((_, i) => {
+      const el = document.getElementById(`visita-${i}`);
+      if (el) state.visitaCheck[i] = el.checked;
+    });
+    materialesPOP.forEach((_, i) => {
+      const el = document.getElementById(`pop-${i}`);
+      if (el) state.popCheck[i] = el.checked;
+    });
+    localStorage.setItem('formState', JSON.stringify(state));
+  } catch(e) {}
+}
+
+function restoreFormState() {
+  try {
+    const stateStr = localStorage.getItem('formState');
+    if (!stateStr) return;
+    const state = JSON.parse(stateStr);
+    if (state.zona && document.getElementById('zona')) document.getElementById('zona').value = state.zona;
+    if (state.tienda && document.getElementById('tienda')) document.getElementById('tienda').value = state.tienda;
+    if (state.notas && document.getElementById('notas-visita')) document.getElementById('notas-visita').value = state.notas;
+    if (state.comproPorGenomma && document.getElementById('compro-genomma')) document.getElementById('compro-genomma').checked = state.comproPorGenomma;
+    if (state.comproPorDuracell && document.getElementById('compro-duracell')) document.getElementById('compro-duracell').checked = state.comproPorDuracell;
+    // Las marcas se restauran en actualizarDependenciasAudit
+    if (state._marcasCheck) window._pendingMarcasRestore = state.marcasCheck;
+    if (state._visitaCheck) window._pendingVisitaRestore = state.visitaCheck;
+    window._pendingMarcasRestore = state.marcasCheck;
+    window._pendingVisitaRestore = state.visitaCheck;
+    window._pendingPopRestore = state.popCheck;
+  } catch(e) {}
+}
+
+// ==========================================
+// INICIO DE DÍA
+// ==========================================
+function verificarInicioDia() {
+  if (datoDiario) return; // Ya completado hoy
+  
+  // Poblar checkboxes de agotados
+  const contenedorAgotados = document.getElementById('dia-agotados-container');
+  if (contenedorAgotados) {
+    let htmlAgotados = '';
+    marcas.forEach(m => {
+      const nombre = typeof m === 'object' ? m.nombre : m;
+      htmlAgotados += `<div class="cuali-item"><span>${nombre}</span><input type="checkbox" id="agotado-${nombre.replace(/\s/g,'_')}" style="width:20px;height:20px;accent-color:var(--primary);"></div>`;
+    });
+    contenedorAgotados.innerHTML = htmlAgotados;
+  }
+  
+  const modal = document.getElementById('modal-inicio-dia');
+  if (modal) { modal.style.display = 'flex'; }
+}
+
+function guardarDatoDiario() {
+  const codigo = document.getElementById('dia-codigo-ruta')?.value.trim();
+  const numClientes = document.getElementById('dia-num-clientes')?.value.trim();
+  
+  if (!codigo || !numClientes) return alert('Por favor completa el Código de Ruta y el Número de Clientes.');
+  
+  const agotados = [];
+  marcas.forEach(m => {
+    const nombre = typeof m === 'object' ? m.nombre : m;
+    const cb = document.getElementById(`agotado-${nombre.replace(/\s/g,'_')}`);
+    if (cb && cb.checked) agotados.push(nombre);
+  });
+  
+  datoDiario = { codigo, numClientes, agotados, fecha: getHoy() };
+  localStorage.setItem('datoDiario_' + getHoy(), JSON.stringify(datoDiario));
+  
+  const modal = document.getElementById('modal-inicio-dia');
+  if (modal) modal.style.display = 'none';
+  showToast('¡Jornada iniciada!');
+}
+
+// ==========================================
+// INFORME OPERATIVO
+// ==========================================
+function generarInformeOperativo() {
+  const datos = obtenerDatosFiltrados().principal;
+  if (datos.length === 0) return alert("Sin datos para el periodo seleccionado.");
+  
+  const grupos = {};
+  datos.forEach(v => {
+    const clave = `${v.distribuidor}|${v.vendedor}`;
+    if (!grupos[clave]) grupos[clave] = [];
+    grupos[clave].push(v);
+  });
+  
+  let informes = [];
+  Object.keys(grupos).forEach(clave => {
+    const grupo = grupos[clave];
+    const datos0 = grupo[0];
+    const claveEdit = `${datos0.fechaISO}|${datos0.distribuidor}|${datos0.vendedor}`;
+    const editData = datosHistorialEdit[claveEdit] || {};
+    
+    const impactosGenomma = editData.impactosGenomma !== undefined ? editData.impactosGenomma : grupo.filter(v => v.comproPorGenomma).length;
+    const valorGenomma = editData.valorGenomma !== undefined ? editData.valorGenomma : 0;
+    
+    const distriObj = distribuidores.find(d => d.nombre === datos0.distribuidor);
+    const vendeDuracell = distriObj && distriObj.marcasAsignadas && distriObj.marcasAsignadas.includes('Duracell');
+    
+    const impactosDuracell = vendeDuracell ? (editData.impactosDuracell !== undefined ? editData.impactosDuracell : grupo.filter(v => v.comproPorDuracell).length) : 0;
+    const valorDuracell = vendeDuracell ? (editData.valorDuracell !== undefined ? editData.valorDuracell : 0) : 0;
+    
+    const totalImpactos = impactosGenomma + impactosDuracell;
+    const totalValor = parseFloat(valorGenomma || 0) + parseFloat(valorDuracell || 0);
+    
+    const numVisitas = datoDiario ? datoDiario.numClientes : grupo.length;
+    
+    let texto = `Buenas tardes\n\nAcompañamiento\n${datos0.distribuidor}\nVendedor: ${datos0.vendedor}\nVisitas: ${numVisitas}\n*Genomma*\nImpactos: ${impactosGenomma}\nValor total: $${Number(valorGenomma||0).toLocaleString('es-CO')}\n*Duracell*\nImpactos: ${impactosDuracell}\nValor: $${Number(valorDuracell||0).toLocaleString('es-CO')}\n*Total*\nImpactos: ${totalImpactos}\nValor: $${totalValor.toLocaleString('es-CO')}`;
+    
+    informes.push(texto);
+  });
+  
+  const box = document.getElementById('box-informe-operativo');
+  if (box) {
+    box.style.display = 'block';
+    box.innerHTML = informes.map((inf, i) => `
+      <div style="background:white; border-radius:8px; padding:12px; margin-bottom:10px; border-left:4px solid var(--success); font-family:monospace; white-space:pre-line; font-size:0.85rem;">${inf.replace(/\*(.*?)\*/g,'<b>$1</b>')}
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button onclick="copiarInformeOp(${i})" class="btn-primary" style="flex:1; padding:8px; font-size:0.85rem; background:#25D366;"><i class="fab fa-whatsapp"></i> Copiar/WA</button>
+      </div>
+      </div>`).join('');
+    window._informesOpText = informes;
+  }
+  document.getElementById('box-reporte-gerencia').style.display = 'none';
+  
+  // Auto-guardar informe operativo
+  informes.forEach((texto, i) => {
+    const nuevoInforme = {
+      id: Date.now() + i,
+      tipo: 'operativo',
+      fecha: getHoy(),
+      horaGuardado: new Date().toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'}),
+      texto: texto.replace(/\*(.*?)\*/g,'<b>$1</b>'),
+      textoPlano: texto
+    };
+    informesGuardados.push(nuevoInforme);
+  });
+  localStorage.setItem('informesGuardados', JSON.stringify(informesGuardados));
+  showToast('Informe operativo guardado');
+}
+
+function copiarInformeOp(index) {
+  if (!window._informesOpText) return;
+  const texto = window._informesOpText[index];
+  navigator.clipboard.writeText(texto).then(() => showToast('¡Copiado al portapapeles!')).catch(() => {
+    const wa = `https://wa.me/?text=${encodeURIComponent(texto)}`;
+    window.open(wa, '_blank');
+  });
+}
+
+function buscarInformesPorFecha() {
+  const fecha = document.getElementById('filtro-informes-fecha')?.value;
+  if (!fecha) return;
+  const container = document.getElementById('lista-informes-guardados');
+  if (!container) return;
+  
+  const encontrados = informesGuardados.filter(inf => inf.fecha === fecha);
+  if (encontrados.length === 0) {
+    container.innerHTML = '<p style="color:#888; text-align:center;">No hay informes guardados en esta fecha.</p>';
+    return;
+  }
+  
+  const colores = { supervisor: '#673AB7', operativo: '#28a745', ia: '#0066cc' };
+  const labels = { supervisor: 'Supervisor', operativo: 'Operativo', ia: 'IA' };
+  
+  container.innerHTML = encontrados.reverse().map((inf) => {
+    const tipo = inf.tipo || 'ia';
+    const color = colores[tipo] || '#673AB7';
+    const label = labels[tipo] || tipo;
+    const waText = encodeURIComponent(inf.textoPlano || inf.texto.replace(/<[^>]*>/g,''));
+    return `
+    <div style="background:white; border-radius:8px; padding:10px; margin-bottom:8px; border-left:4px solid ${color};">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+        <span style="font-size:0.7rem; font-weight:bold; background:${color}; color:white; padding:2px 8px; border-radius:10px;">${label}</span>
+        <span style="font-size:0.75rem; color:#666;"><i class="fas fa-clock"></i> ${inf.horaGuardado}</span>
+      </div>
+      <div style="cursor:pointer;" onclick="toggleDirElement('inf-body-${inf.id}','inf-icon-${inf.id}')">
+        <span style="font-size:0.85rem; color:#333; font-weight:bold;">Ver contenido <i class="fas fa-chevron-down" id="inf-icon-${inf.id}"></i></span>
+      </div>
+      <div id="inf-body-${inf.id}" style="display:none; margin-top:8px; font-size:0.82rem; color:#444;">${inf.texto}</div>
+      <button class="btn-primary" style="margin-top:8px; padding:6px 12px; width:auto; font-size:0.8rem; background:#25D366;" onclick="window.open('https://wa.me/?text=${waText}','_blank')">
+        <i class="fab fa-whatsapp"></i> Enviar WA
+      </button>
+      <button class="btn-primary" style="margin-top:8px; padding:6px 12px; width:auto; font-size:0.8rem; background:#dc3545; margin-left:5px;" onclick="eliminarInforme(${inf.id})">
+        <i class="fas fa-trash"></i>
+      </button>
+    </div>`;
+  }).join('');
+}
+
+function eliminarInforme(id) {
+  if (!confirm('¿Eliminar este informe?')) return;
+  informesGuardados = informesGuardados.filter(i => i.id !== id);
+  localStorage.setItem('informesGuardados', JSON.stringify(informesGuardados));
+  buscarInformesPorFecha();
+  showToast('Informe eliminado');
+}
+
+function toggleDirElement(bodyId, iconId) {
+  const body = document.getElementById(bodyId);
+  const icon = document.getElementById(iconId);
+  
+  if (!body || !icon) return;
+  
+  if (body.style.display === 'none' || body.style.display === '') {
+    body.style.display = 'block';
+    icon.classList.remove('fa-chevron-down');
+    icon.classList.add('fa-chevron-up');
+  } else {
+    body.style.display = 'none';
+    icon.classList.remove('fa-chevron-up');
+    icon.classList.add('fa-chevron-down');
+  }
+}
+
+// ==========================================
+// 6. FOTOS Y COMPRESIÓN
+// ==========================================
+function procesarFoto(event) {
+  const file = event.target.files[0]; 
+  if (!file) return; 
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const img = new Image(); 
+    img.onload = function() {
+      fotoBase64AI = comprimirImagen(img, 800, 0.7); 
+      fotoMinBase64 = comprimirImagen(img, 150, 0.5); 
+      
+      document.getElementById("foto-preview").src = fotoBase64AI; 
+      document.getElementById("foto-preview-container").style.display = "block";
+      document.getElementById("btn-ia-foto").style.display = "block"; 
+      document.getElementById("box-ia-foto").style.display = "none";
+      
+      // Auto-analizar si hay API key configurada
+      if (geminiApiKey) {
+        analizarFotoIA();
+      }
+    }; 
+    img.src = e.target.result;
+  }; 
+  reader.readAsDataURL(file);
+}
+
+function comprimirImagen(img, maxWidth, quality) {
+  const canvas = document.createElement("canvas"); 
+  let width = img.width; 
+  let height = img.height;
+  
+  if (width > maxWidth) { 
+    height = Math.round((height * maxWidth) / width); 
+    width = maxWidth; 
+  }
+  
+  canvas.width = width; 
+  canvas.height = height; 
+  const ctx = canvas.getContext("2d"); 
+  ctx.drawImage(img, 0, 0, width, height); 
+  
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+// ==========================================
+// 7. DICTADO POR VOZ
+// ==========================================
+function iniciarDictado(inputId, btnId) {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) { 
+    alert("Tu navegador no soporta dictado por voz. Usa Chrome."); 
+    return; 
+  }
+  
+  const btn = document.getElementById(btnId); 
+  const area = document.getElementById(inputId); 
+  const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+  
+  recognition.lang = 'es-ES'; 
+  recognition.interimResults = false;
+  
+  recognition.onstart = function() { 
+    btn.classList.add("pulsing"); 
+  };
+  
+  recognition.onresult = function(event) { 
+    area.value += (area.value ? " " : "") + event.results[0][0].transcript + ". "; 
+  };
+  
+  recognition.onerror = function() { 
+    btn.classList.remove("pulsing"); 
+  }; 
+  
+  recognition.onend = function() { 
+    btn.classList.remove("pulsing"); 
+  }; 
+  
+  recognition.start();
+}
+
+function toggleGrabacionCentral() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) { 
+    alert("Navegador no soporta dictado."); 
+    return; 
+  }
+  
+  const btn = document.getElementById("btn-grabar-central"); 
+  const status = document.getElementById("status-grabacion"); 
+  const area = document.getElementById("texto-nota-central");
+  
+  if (isRecordingGlobal) {
+    // Parar grabación
+    if(voiceRecognition) voiceRecognition.stop();
+    btn.classList.remove("pulsing"); 
+    btn.innerHTML = '<i class="fas fa-microphone"></i>'; 
+    status.style.display = "none"; 
+    isRecordingGlobal = false;
+    document.getElementById("panel-nota-nueva").style.display = "block"; 
+    document.getElementById("box-respuesta-asistente").style.display = "none";
+  } else {
+    // Iniciar grabación
+    isRecordingGlobal = true; 
+    area.value = ""; 
+    document.getElementById("msg-ia-nota").style.display = "none"; 
+    document.getElementById("box-respuesta-asistente").style.display = "none";
+    btn.classList.add("pulsing"); 
+    btn.innerHTML = '<i class="fas fa-stop"></i>'; 
+    status.style.display = "block"; 
+    document.getElementById("panel-nota-nueva").style.display = "none";
+    
+    voiceRecognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    voiceRecognition.lang = 'es-ES'; 
+    voiceRecognition.interimResults = false;
+    
+    voiceRecognition.onresult = function(event) { 
+      area.value += (area.value ? " " : "") + event.results[0][0].transcript + ". "; 
+    };
+    
+    voiceRecognition.onerror = function() { 
+      btn.classList.remove("pulsing"); 
+      btn.innerHTML = '<i class="fas fa-microphone"></i>'; 
+      status.style.display = "none"; 
+      isRecordingGlobal = false; 
+    };
+    
+    voiceRecognition.onend = function() { 
+      btn.classList.remove("pulsing"); 
+      btn.innerHTML = '<i class="fas fa-microphone"></i>'; 
+      status.style.display = "none"; 
+      isRecordingGlobal = false; 
+      if (area.value.trim() !== "") {
+        document.getElementById("panel-nota-nueva").style.display = "block";
+      }
+    };
+    
+    voiceRecognition.start();
+  }
+}
+
+// ==========================================
+// 8. ASISTENTE VIRTUAL RAG Y CALENDARIO
+// ==========================================
+function formatearBaseDatosIA() {
+  const visRes = visitas.slice(-15).map(v => ({ 
+    fecha: v.fechaISO, 
+    vendedor: v.vendedor, 
+    tienda: v.tienda, 
+    notas: v.notas 
+  }));
+  const notRes = notasGlobales.slice(-10).map(n => ({ 
+    fecha: n.fechaCreacion, 
+    titulo: n.titulo, 
+    contenido: n.textoOriginal 
+  }));
+  return JSON.stringify({ ultimas_visitas: visRes, mis_notas: notRes });
+}
+
+function generarEnlaceCalendario(titulo, detalle, fecha, hora) {
+  if (!fecha) return "";
+  const horaValida = hora ? hora : "09:00";
+  const fStr = fecha.replace(/-/g, ''); 
+  const hStr = horaValida.replace(/:/g, '') + '00';
+  
+  const tituloCodificado = encodeURIComponent(titulo);
+  const detalleCodificado = encodeURIComponent(detalle);
+  
+  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${tituloCodificado}&dates=${fStr}T${hStr}/${fStr}T${hStr}&details=${detalleCodificado}`;
+}
+
+async function enviarAlAsistenteIA() {
+  const textoOriginal = document.getElementById("texto-nota-central").value.trim();
+  const urgente = document.getElementById("urgente-nota").checked;
+  const fechaManual = document.getElementById("fecha-recordatorio").value;
+  const horaManual = document.getElementById("hora-recordatorio").value;
+  
+  const btn = document.getElementById("btn-procesar-nota-ia"); 
+  const msg = document.getElementById("msg-ia-nota"); 
+  const boxResp = document.getElementById("box-respuesta-asistente");
+
+  if (!textoOriginal) return alert("La caja de texto está vacía. Escribe o dicta algo.");
+  
+  if (!geminiApiKey) { 
+    alert("⚠️ No tienes API Key configurada. La nota se guardará de forma manual.");
+    let recordatorioVacio = null;
+    if (fechaManual) {
+      let horaGuardar = horaManual ? horaManual : '09:00';
+      recordatorioVacio = `${fechaManual} ${horaGuardar}`;
+    }
+    return guardarNotaFisica("Nota de Campo", textoOriginal, textoOriginal, urgente, recordatorioVacio);
+  }
+
+  btn.disabled = true; 
+  msg.style.display = "block"; 
+  boxResp.style.display = "none";
+  msg.innerHTML = '<i class="fas fa-spinner fa-spin"></i> La IA está analizando tu nota...';
+  
+  const d = new Date(); 
+  const mesFormat = String(d.getMonth() + 1).padStart(2, '0');
+  const diaFormat = String(d.getDate()).padStart(2, '0');
+  const fechaHoyTexto = `${d.getFullYear()}-${mesFormat}-${diaFormat}`;
+
+  const prompt = `Eres el Asistente IA de Cesar Pescador. 
+  FECHA DE HOY: ${fechaHoyTexto}.
+  BASE DE DATOS: ${formatearBaseDatosIA()}
+
+  Texto del usuario: "${textoOriginal}"
+
+  INSTRUCCIONES ESTRICTAS:
+  1. Si es PREGUNTA sobre la BD (ej. "¿Cuándo visité a Juan?"): "accion" es "pregunta".
+  2. Si quiere AGENDAR/RECORDAR algo (ej. "Reunión mañana a las 3"): "accion" es "agendar", deduce "titulo", "resumen", "fecha_agendada" (YYYY-MM-DD) y "hora_agendada" (HH:MM). Si dice mañana, suma 1 día a la fecha de hoy.
+  3. Si es NOTA/COMENTARIO (ej. "Falta producto en tienda"): "accion" es "nota", deduce OBLIGATORIAMENTE un "titulo" (máximo 5 palabras) y un "resumen".
+
+  RESPONDE SÓLO CON ESTE JSON ESTRICTO, NADA DE TEXTO EXTRA NI SALUDOS ANTES NI DESPUES DEL JSON:
+  {
+    "accion": "pregunta",
+    "respuesta": "Tu respuesta si es pregunta. Vacio si no.",
+    "titulo": "Titulo corto aqui",
+    "resumen": "Resumen aqui",
+    "fecha_agendada": "YYYY-MM-DD",
+    "hora_agendada": "HH:MM"
+  }`;
+
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({ contents: [{ parts:[{ text: prompt }] }] })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Google rechazó la conexión (Error ${response.status}). Verifica tu API Key.`);
+    }
+    
+    const data = await response.json(); 
+    let textRaw = data.candidates[0].content.parts[0].text;
+    
+    // Extracción ultra-segura del JSON ignorando basura de la IA
+    const jsonMatch = textRaw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error("La IA no devolvió un formato JSON válido.");
+    }
+    
+    let iaResult = JSON.parse(jsonMatch[0]);
+
+    if (iaResult.accion === "pregunta") {
+      let respuestaFormateada = iaResult.respuesta.replace(/\n/g, '<br>');
+      boxResp.innerHTML = `<b><i class="fas fa-robot"></i> Asistente Genomma Lab:</b><br><br>${respuestaFormateada}`;
+      boxResp.style.display = "block"; 
+      btn.disabled = false; 
+      msg.style.display = "none";
+    } 
+    else {
+      let tituloFinal = "Nota de Campo";
+      if (iaResult.titulo && iaResult.titulo.length > 2) {
+        tituloFinal = iaResult.titulo;
+      }
+      
+      const resumenFinal = iaResult.resumen || textoOriginal;
+      
+      let htmlFormat = resumenFinal.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+      htmlFormat = htmlFormat.replace(/\*(.*?)\n/g, '<li>$1</li>');
+      htmlFormat = htmlFormat.replace(/\n/g, '<br>');
+      
+      let fAg = fechaManual; 
+      let hAg = horaManual;
+      
+      if (iaResult.accion === "agendar") {
+         fAg = iaResult.fecha_agendada || fechaManual || fechaHoyTexto;
+         hAg = iaResult.hora_agendada || horaManual || "09:00";
+      }
+
+      let recordatorioStr = null;
+      if (fAg) {
+        let hFormat = hAg ? hAg : "09:00";
+        recordatorioStr = `${fAg} ${hFormat}`;
+      }
+
+      guardarNotaFisica(tituloFinal, textoOriginal, htmlFormat, urgente, recordatorioStr);
+      btn.disabled = false; 
+      msg.style.display = "none";
+    }
+
+  } catch(e) {
+    console.error("Error procesando IA:", e);
+    let recVacio = null;
+    if (fechaManual) {
+      let hFormat = horaManual ? horaManual : '09:00';
+      recVacio = `${fechaManual} ${hFormat}`;
+    }
+    guardarNotaFisica("Nota Guardada Manualmente", textoOriginal, textoOriginal, urgente, recVacio);
+    btn.disabled = false; 
+    msg.style.display = "none"; 
+    alert(`Ocurrió un error con la IA. La nota se guardó manual en el historial.`);
+  }
+}
+
+async function guardarNotaFisica(titulo, original, procesado, urgente, stringRecordatorio) {
+  const nuevaNota = { 
+    id: Date.now(), 
+    fechaCreacion: new Date().toLocaleString(), 
+    titulo: titulo, 
+    textoOriginal: original, 
+    textoHtml: procesado, 
+    urgente: urgente, 
+    recordatorio: stringRecordatorio 
+  };
+  
+  try {
+    if (db) {
+      await db.collection("notas").doc(nuevaNota.id.toString()).set(nuevaNota);
+    } else {
+      notasGlobales.push(nuevaNota); 
+      localStorage.setItem("notasGlobales", JSON.stringify(notasGlobales));
+    }
+    
+    document.getElementById("texto-nota-central").value = ""; 
+    document.getElementById("urgente-nota").checked = false; 
+    document.getElementById("fecha-recordatorio").value = ""; 
+    document.getElementById("hora-recordatorio").value = "";
+    document.getElementById("panel-nota-nueva").style.display = "none"; 
+    
+    showToast("¡Nota Guardada!"); 
+    renderizarNotasGlobales();
+  } catch(e) {
+    alert("Error guardando nota: " + e.message);
+  }
+}
+
+function renderizarNotasGlobales() {
+  const contenedor = document.getElementById("lista-notas-central");
+  if (notasGlobales.length === 0) {
+    contenedor.innerHTML = `<p style="text-align:center; color:#888;">No tienes notas guardadas.</p>`;
+    return;
+  }
+  
+  const ordenadas = [...notasGlobales].sort((a,b) => {
+    return (b.urgente - a.urgente) || (b.id - a.id);
+  });
+  
+  let htmlNotas = "";
+  
+  ordenadas.forEach(n => {
+    let btnCalendario = "";
+    
+    if (n.recordatorio) {
+      const parts = n.recordatorio.split(" ");
+      const tituloEvento = (n.urgente ? "🔥 URGENTE: " : "📌 ") + n.titulo;
+      const linkCal = generarEnlaceCalendario(tituloEvento, n.textoOriginal, parts[0], parts[1]);
+      
+      btnCalendario = `
+      <a href="${linkCal}" target="_blank" style="display:block; background:#4285F4; color:white; padding:10px; border-radius:8px; text-align:center; text-decoration:none; font-weight:bold; margin-top:15px; box-shadow:0 2px 4px rgba(0,0,0,0.2);">
+        <i class="fas fa-calendar-plus"></i> 📅 Guardar en Google Calendar
+      </a>`;
+    }
+
+    let claseUrgente = n.urgente ? 'nota-urgente' : '';
+    let iconoUrgente = n.urgente ? '🔥 ' : '';
+    let textoWhatsapp = encodeURIComponent(`*${n.titulo}*\n\n${n.textoOriginal}`);
+
+    htmlNotas += `
+    <div class="contacto-card ${claseUrgente}" style="margin-bottom:10px; padding:10px;">
+      <div style="font-size:0.75rem; color:#666; margin-bottom:5px; display:flex; justify-content:space-between; align-items:center;">
+        <span><i class="fas fa-clock"></i> ${n.fechaCreacion}</span>
+        <div style="display:flex; gap:15px;">
+          <i class="fab fa-whatsapp" style="color:#25D366; font-size:1.2rem; cursor:pointer;" onclick="window.open('https://wa.me/?text=${textoWhatsapp}', '_blank')"></i>
+          <i class="fas fa-trash" style="color:red; font-size:1.1rem; cursor:pointer;" onclick="eliminarDato('notas', ${n.id})"></i>
+        </div>
+      </div>
+      <div style="font-size:1rem; font-weight:bold; color:var(--primary); margin-bottom:5px; cursor:pointer;" onclick="toggleDirElement('body-nota-${n.id}', 'icon-nota-${n.id}')">
+        ${iconoUrgente}${n.titulo} <i class="fas fa-caret-down" id="icon-nota-${n.id}" style="float:right; margin-top:3px;"></i>
+      </div>
+      <div id="body-nota-${n.id}" style="display:none; font-size:0.9rem; color:#444; border-top:1px solid #eee; padding-top:8px; margin-top:5px;">
+        ${n.textoHtml}
+        ${n.recordatorio ? `<div style="font-size:0.8rem; color:#17a2b8; font-weight:bold; margin-top:8px;"><i class="fas fa-clock"></i> Agendado para: ${n.recordatorio}</div>` : ''}
+        ${btnCalendario}
+      </div>
+    </div>`;
+  });
+  
+  contenedor.innerHTML = htmlNotas;
+}
+
+// ==========================================
+// 9. RENDERIZADO GENERAL Y AUDITORÍA
+// ==========================================
+function renderizarApp() {
+  let distriOptions = "";
+  distribuidores.forEach(d => {
+    distriOptions += `<option value="${d.nombre}">${d.nombre}</option>`;
+  });
+  
+  if (document.getElementById("distribuidor")) {
+    document.getElementById("distribuidor").innerHTML = distriOptions; 
+  }
+  
+  // RENDERS EN AJUSTES Y CREACIONES (SOLUCIONA EL BUG)
+  
+  let htmlDistribuidores = "";
+  distribuidores.forEach((d) => {
+    let cantSups = d.supervisores ? d.supervisores.length : 0;
+    htmlDistribuidores += `
+      <div class="item" style="flex-direction:column; align-items:flex-start;">
+        <div><b>${d.nombre}</b> <small>(${d.ciudad || 'Sin ciudad'})</small></div>
+        <div style="width:100%; display:flex; justify-content:space-between; margin-top:5px; align-items:center;">
+          <span><i class="fas fa-users"></i> ${cantSups} Sups.</span> 
+          <div style="display:flex; gap:5px;">
+            <button class="btn-icon" style="background:#6c757d; padding:4px 8px; width:auto;" onclick="cargarEdicionDistribuidor(${d.id})"><i class="fas fa-edit"></i></button>
+            <button class="btn-icon delete" onclick="eliminarDato('distribuidores', ${d.id})" style="padding:4px 8px; width:auto; background:var(--danger);"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+      </div>`;
+  });
+  
+  if (document.getElementById("lista-distribuidores-config")) {
+    document.getElementById("lista-distribuidores-config").innerHTML = htmlDistribuidores;
+  }
+  
+  let htmlVendConfig = "";
+  vendedores.forEach((v) => {
+    htmlVendConfig += `
+      <div class="item" style="flex-direction:column; align-items:flex-start;">
+        <div><b>${v.nombre}</b> <small>(${v.distribuidor})</small></div>
+        <div style="width:100%; display:flex; justify-content:space-between; margin-top:5px; align-items:center;">
+          <span><i class="fas fa-phone"></i> ${v.telefono}</span> 
+          <div style="display:flex; gap:5px;">
+            <button class="btn-icon" style="background:#6c757d; padding:4px 8px; width:auto;" onclick="cargarEdicionVendedor(${v.id})"><i class="fas fa-edit"></i></button>
+            <button class="btn-icon delete" onclick="eliminarDato('vendedores', ${v.id})" style="padding:4px 8px; width:auto; background:var(--danger);"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+      </div>`;
+  });
+  
+  if (document.getElementById("lista-vendedores-config")) {
+    document.getElementById("lista-vendedores-config").innerHTML = htmlVendConfig;
+  }
+
+  // Marcas en Ajustes
+  let htmlMarcasConfig = "";
+  marcas.forEach((m) => {
+    const nombre = (typeof m === 'object') ? m.nombre : m;
+    htmlMarcasConfig += `
+      <div class="item" style="flex-direction:column; align-items:flex-start;">
+        <div><b>${nombre}</b></div>
+        <div style="width:100%; display:flex; justify-content:space-between; margin-top:5px; align-items:center;">
+          <span class="badge-stats" style="background:#17a2b8;">Global</span> 
+          <button class="btn-icon delete" onclick="eliminarDato('marcas', '${nombre}')" style="padding:4px 8px; width:auto; background:var(--danger);"><i class="fas fa-trash"></i></button>
+        </div>
+      </div>`;
+  });
+  
+  if (document.getElementById("lista-marcas-config")) {
+    document.getElementById("lista-marcas-config").innerHTML = htmlMarcasConfig;
+  }
+
+  // Cargar checklist estáticos
+  let htmlDiario = "";
+  aspectosDiarios.forEach((aspecto, index) => {
+    htmlDiario += `<div class="cuali-item" style="color:var(--primary);"><span>${aspecto}</span><input type="checkbox" id="diario-${index}"></div>`;
+  });
+  if (document.getElementById("eval-diaria-container")) {
+    document.getElementById("eval-diaria-container").innerHTML = htmlDiario;
+  }
+  
+  let htmlVisita = "";
+  aspectosVisita.forEach((aspecto, index) => {
+    htmlVisita += `<div class="cuali-item"><span>${aspecto}</span><input type="checkbox" id="visita-${index}"></div>`;
+  });
+  if (document.getElementById("eval-visita-container")) {
+    document.getElementById("eval-visita-container").innerHTML = htmlVisita;
+  }
+  
+  let htmlPop = "";
+  // Solo Pastillero Genomma se renderiza siempre; Ganchera Duracell se maneja en actualizarDependenciasAudit
+  const popBase = materialesPOP.filter(p => !p.toLowerCase().includes('duracell'));
+  popBase.forEach((pop, index) => {
+    htmlPop += `<div class="cuali-item"><span>${pop}</span><input type="checkbox" id="pop-${index}" onchange="saveFormState()"></div>`;
+  });
+  if (document.getElementById("pop-container")) {
+    document.getElementById("pop-container").innerHTML = htmlPop;
+  }
+
+  actualizarDependenciasAudit();
+}
+
+// MAGIA RELACIONAL: DISTRIBUIDOR -> VENDEDORES Y MARCAS
+function actualizarDependenciasAudit() {
+  const selectDistri = document.getElementById("distribuidor");
+  if (!selectDistri) return;
+  
+  const distriSeleccionado = selectDistri.value;
+  
+  // 1. Mostrar solo vendedores de este distribuidor en la calle
+  const vendFiltrados = vendedores.filter(v => v.distribuidor === distriSeleccionado);
+  const selectVendedor = document.getElementById("vendedor");
+  
+  if (vendFiltrados.length === 0) {
+    selectVendedor.innerHTML = `<option value="">Sin vendedores en ruta</option>`;
+  } else {
+    let htmlVends = "";
+    vendFiltrados.forEach(v => {
+      htmlVends += `<option value="${v.nombre}">${v.nombre}</option>`;
+    });
+    selectVendedor.innerHTML = htmlVends;
+  }
+  
+  // 2. Mostrar solo marcas asignadas a este distribuidor
+  const distriObj = distribuidores.find(d => d.nombre === distriSeleccionado);
+  const vendeDuracell = distriObj && distriObj.marcasAsignadas && distriObj.marcasAsignadas.includes('Duracell');
+  
+  const marcasFiltradas = (distriObj && distriObj.marcasAsignadas && distriObj.marcasAsignadas.length > 0)
+    ? marcas.filter(m => { const nombre = (typeof m === 'object') ? m.nombre : m; return distriObj.marcasAsignadas.includes(nombre); })
+    : marcas;
+  const contenedorMarcas = document.getElementById("marcas-senso");
+  
+  if (marcasFiltradas.length === 0) {
+    contenedorMarcas.innerHTML = `<p style="color:#888; font-size:0.9rem;">Sin marcas asignadas a este distribuidor.</p>`;
+  } else {
+    let htmlMarcas = "";
+    marcasFiltradas.forEach((m, i) => {
+      const nombre = (typeof m === 'object') ? m.nombre : m;
+      htmlMarcas += `<div class="marca-item"><span>${nombre}</span><input type="checkbox" data-marca="${nombre}" id="check-marca-${i}" onchange="saveFormState()"></div>`;
+    });
+    contenedorMarcas.innerHTML = htmlMarcas;
+  }
+  
+  // 3. Mostrar/ocultar Ganchera Duracell en POP según si el distribuidor vende Duracell
+  const popContainer = document.getElementById("pop-container");
+  const popBaseItems = materialesPOP.filter(p => !p.toLowerCase().includes('duracell'));
+  let htmlPop = "";
+  popBaseItems.forEach((pop, index) => {
+    htmlPop += `<div class="cuali-item"><span>${pop}</span><input type="checkbox" id="pop-${index}" onchange="saveFormState()"></div>`;
+  });
+  if (vendeDuracell) {
+    const duracellPop = materialesPOP.find(p => p.toLowerCase().includes('duracell'));
+    if (duracellPop) {
+      const duracellIndex = materialesPOP.indexOf(duracellPop);
+      htmlPop += `<div class="cuali-item"><span>${duracellPop}</span><input type="checkbox" id="pop-${duracellIndex}" onchange="saveFormState()"></div>`;
+    }
+  }
+  if (popContainer) popContainer.innerHTML = htmlPop;
+  
+  // 4. Mostrar/ocultar casilla Compró Duracell
+  const filaCompDuracell = document.getElementById('fila-compro-duracell');
+  if (filaCompDuracell) filaCompDuracell.style.display = vendeDuracell ? 'flex' : 'none';
+
+  // 5. Formularios ocultos de creación (Ajustes)
+  if (document.getElementById("config-vend-distri")) {
+    let distriOptions = "";
+    distribuidores.forEach(d => {
+      distriOptions += `<option value="${d.nombre}">${d.nombre}</option>`;
+    });
+    document.getElementById("config-vend-distri").innerHTML = distriOptions;
+  }
+
+  if (document.getElementById("config-marca-distri")) {
+    let distriOptions = `<option value="Todos">Todos los distribuidores</option>`;
+    distribuidores.forEach(d => {
+      distriOptions += `<option value="${d.nombre}">${d.nombre}</option>`;
+    });
+    document.getElementById("config-marca-distri").innerHTML = distriOptions;
+  }
+  
+  // 6. Restaurar checkboxes pendientes
+  if (window._pendingMarcasRestore) {
+    setTimeout(() => {
+      Object.keys(window._pendingMarcasRestore).forEach(marca => {
+        const el = document.querySelector(`#marcas-senso input[data-marca="${marca}"]`);
+        if (el) el.checked = window._pendingMarcasRestore[marca];
+      });
+    }, 100);
+  }
+  if (window._pendingVisitaRestore) {
+    setTimeout(() => {
+      Object.keys(window._pendingVisitaRestore).forEach(i => {
+        const el = document.getElementById(`visita-${i}`);
+        if (el) el.checked = window._pendingVisitaRestore[i];
+      });
+    }, 100);
+  }
+  if (window._pendingPopRestore) {
+    setTimeout(() => {
+      Object.keys(window._pendingPopRestore).forEach(i => {
+        const el = document.getElementById(`pop-${i}`);
+        if (el) el.checked = window._pendingPopRestore[i];
+      });
+    }, 100);
+  }
+  
+  verificarEvaluacionDiaria();
+  saveFormState();
+}
+
+function verificarEvaluacionDiaria() {
+  const vendedorEl = document.getElementById("vendedor");
+  if (!vendedorEl) return;
+  
+  const vendedor = vendedorEl.value;
+  
+  if (!vendedor) { 
+    document.getElementById("eval-diaria-container").style.display = "none"; 
+    document.getElementById("alerta-compromisos").style.display = "none"; 
+    return; 
+  }
+  
+  const visitasHoy = visitas.filter(v => v.fechaISO === getHoy() && v.vendedor === vendedor);
+  
+  if (visitasHoy.length > 0) { 
+    document.getElementById("eval-diaria-container").style.display = "none"; 
+    document.getElementById("msg-eval-diaria").style.display = "block"; 
+    document.getElementById("msg-eval-diaria").innerHTML = `<i class="fas fa-check-double"></i> <b>${vendedor}</b> ya evaluado en presentación hoy.`; 
+  } else { 
+    document.getElementById("eval-diaria-container").style.display = "block"; 
+    document.getElementById("msg-eval-diaria").style.display = "none"; 
+    aspectosDiarios.forEach((_, i) => document.getElementById(`diario-${i}`).checked = false); 
+  }
+
+  const alerta = document.getElementById("alerta-compromisos"); 
+  const visitasPasadas = visitas.filter(v => v.vendedor === vendedor && v.fechaISO !== getHoy());
+  
+  if (visitasPasadas.length > 0) {
+    visitasPasadas.sort((a,b) => new Date(b.fechaISO) - new Date(a.fechaISO));
+    const ultimaVisita = visitasPasadas[0];
+    
+    let fallas = [];
+    if (ultimaVisita.evaluacionVisita) {
+      ultimaVisita.evaluacionVisita.forEach(e => {
+        if (!e.cumple) {
+          fallas.push(e.aspecto);
+        }
+      });
+    }
+    
+    if(fallas.length > 0) { 
+      alerta.style.display = "block"; 
+      let fallasHtml = "";
+      fallas.forEach(f => fallasHtml += `<li>${f}</li>`);
+      alerta.innerHTML = `<strong><i class="fas fa-history"></i> Coaching Pasado:</strong> Falló en: <ul style="margin:5px 0 0 20px;">${fallasHtml}</ul> <b>¡Haz énfasis hoy!</b>`; 
+    } else { 
+      alerta.style.display = "none"; 
+    }
+  } else { 
+    alerta.style.display = "none"; 
+  }
+}
+
+// ==========================================
+// 10. MÓDULO CRUD (EMPRESAS, VENDEDORES, MARCAS)
+// ==========================================
+// === HELPER: Poblar el checklist de marcas en el formulario de distribuidor ===
+function renderMarcasDistribuidor(seleccionadas = []) {
+  const contenedor = document.getElementById("config-dist-marcas-container");
+  if (!contenedor) return;
+  let html = "";
+  marcas.forEach(m => {
+    const nombre = (typeof m === 'object') ? m.nombre : m;
+    const checked = seleccionadas.includes(nombre) ? 'checked' : '';
+    html += `<div class="cuali-item"><span>${nombre}</span><input type="checkbox" class="marca-dist-check" data-marca="${nombre}" ${checked} style="width:20px;height:20px;accent-color:var(--primary);"></div>`;
+  });
+  contenedor.innerHTML = html || `<p style="color:#888;font-size:0.85rem;">No hay marcas en el portafolio global aún.</p>`;
+}
+
+function abrirModalCrear(tipo) {
+  if (tipo === 'vendedor') {
+    if (distribuidores.length === 0) return alert("Primero debes crear un distribuidor.");
+    
+    document.getElementById("config-vend-id").value = ""; 
+    document.getElementById("config-vend-nombre").value = ""; 
+    document.getElementById("config-vend-doc").value = ""; 
+    document.getElementById("config-vend-tel").value = "";
+    
+    document.getElementById("titulo-form-vend").innerHTML = `<i class="fas fa-user-plus"></i> Nuevo Vendedor`;
+    switchTab('view-form-vendedor', 'Crear Vendedor');
+  } else {
+    document.getElementById("config-dist-id").value = ""; 
+    document.getElementById("config-dist-nombre").value = ""; 
+    document.getElementById("config-dist-ciudad").value = ""; 
+    document.getElementById("config-dist-direccion").value = ""; 
+    document.getElementById("config-dist-vendedores").value = ""; 
+    document.getElementById("config-dist-clientes").value = "";
+    
+    supervisoresTemp = []; 
+    renderSupTemp();
+    renderMarcasDistribuidor([]); // Checklist de marcas vacío para nueva empresa
+    
+    document.getElementById("titulo-form-dist").innerHTML = `<i class="fas fa-truck"></i> Nueva Empresa`;
+    switchTab('view-form-distribuidor', 'Crear Distribuidor');
+  }
+}
+
+function cargarEdicionDistribuidor(id) {
+  const dist = distribuidores.find(d => d.id === id);
+  if (!dist) return;
+
+  editandoDistribuidorId = id; 
+  document.getElementById("config-dist-id").value = dist.id;
+  document.getElementById("config-dist-nombre").value = dist.nombre;
+  document.getElementById("config-dist-ciudad").value = dist.ciudad || "";
+  document.getElementById("config-dist-direccion").value = dist.direccion || "";
+  document.getElementById("config-dist-vendedores").value = dist.vendedores || "";
+  document.getElementById("config-dist-clientes").value = dist.clientes || "";
+  
+  supervisoresTemp = dist.supervisores ? [...dist.supervisores] : [];
+  renderSupTemp();
+  renderMarcasDistribuidor(dist.marcasAsignadas || []);
+  
+  document.getElementById("titulo-form-dist").innerHTML = `<i class="fas fa-edit"></i> Editar Empresa`;
+  switchTab('view-form-distribuidor', 'Editar Distribuidor');
+}
+
+function cargarEdicionVendedor(id) {
+  const vend = vendedores.find(v => v.id === id);
+  if (!vend) return;
+
+  editandoVendedorId = id; 
+  document.getElementById("config-vend-id").value = vend.id;
+  document.getElementById("config-vend-nombre").value = vend.nombre;
+  document.getElementById("config-vend-doc").value = vend.documento || "";
+  document.getElementById("config-vend-tel").value = vend.telefono;
+  
+  let opts = "";
+  distribuidores.forEach(d => {
+    let sel = (d.nombre === vend.distribuidor) ? 'selected' : '';
+    opts += `<option value="${d.nombre}" ${sel}>${d.nombre}</option>`;
+  });
+  document.getElementById("config-vend-distri").innerHTML = opts;
+  
+  document.getElementById("titulo-form-vend").innerHTML = `<i class="fas fa-user-edit"></i> Editar Vendedor`;
+  switchTab('view-form-vendedor', 'Editar Vendedor');
+}
+
+function addSupTemp() { 
+  const nom = document.getElementById("config-sup-nombre").value.trim(); 
+  const tel = document.getElementById("config-sup-tel").value.trim(); 
+  
+  if (!nom || !tel) {
+    return alert("Escribe un nombre y teléfono para el supervisor."); 
+  }
+  
+  supervisoresTemp.push({ nombre: nom, telefono: tel }); 
+  document.getElementById("config-sup-nombre").value = ""; 
+  document.getElementById("config-sup-tel").value = ""; 
+  renderSupTemp(); 
+}
+
+function renderSupTemp() { 
+  let html = "";
+  supervisoresTemp.forEach((s, i) => {
+    html += `
+    <div style="font-size:0.85rem; background:#fff; border:1px solid #eee; padding:5px; margin-bottom:3px; display:flex; justify-content:space-between; border-radius:5px;">
+      <span><i class="fas fa-user-shield"></i> ${s.nombre} - ${s.telefono}</span>
+      <i class="fas fa-times" style="color:red; cursor:pointer;" onclick="supervisoresTemp.splice(${i},1); renderSupTemp();"></i>
+    </div>`;
+  });
+  document.getElementById("lista-sups-temp").innerHTML = html;
+}
+
+// === EL GUARDADO MAESTRO DE DISTRIBUIDORES ===
+async function guardarDistribuidor() { 
+  const idEdit = document.getElementById("config-dist-id").value;
+  const nom = document.getElementById("config-dist-nombre").value.trim(); 
+  const ciu = document.getElementById("config-dist-ciudad").value.trim(); 
+  const dir = document.getElementById("config-dist-direccion").value.trim(); 
+  const ven = document.getElementById("config-dist-vendedores").value.trim(); 
+  const cli = document.getElementById("config-dist-clientes").value.trim();
+  
+  if (!nom) return alert("El Nombre de la Distribuidora es obligatorio.");
+
+  // Autoguardado si llenaron la caja pero no le dieron al "+"
+  const supNomPendiente = document.getElementById("config-sup-nombre").value.trim(); 
+  const supTelPendiente = document.getElementById("config-sup-tel").value.trim();
+  if (supNomPendiente && supTelPendiente) {
+    supervisoresTemp.push({ nombre: supNomPendiente, telefono: supTelPendiente });
+  }
+
+  // Leer las marcas seleccionadas para este distribuidor
+  const marcasSeleccionadas = [];
+  document.querySelectorAll(".marca-dist-check:checked").forEach(cb => {
+    marcasSeleccionadas.push(cb.dataset.marca);
+  });
+
+  try {
+    if (idEdit) {
+      let dist = distribuidores.find(d => d.id == idEdit);
+      if (dist) {
+        dist.nombre = nom; 
+        dist.ciudad = ciu; 
+        dist.direccion = dir; 
+        dist.vendedores = ven; 
+        dist.clientes = cli; 
+        dist.supervisores = [...supervisoresTemp];
+        dist.marcasAsignadas = marcasSeleccionadas;
+        
+        if (db) {
+          await db.collection("distribuidores").doc(idEdit.toString()).set(dist);
+        } else {
+          localStorage.setItem("distribuidores", JSON.stringify(distribuidores));
+        }
+      }
+      showToast("Distribuidor Actualizado");
+      editandoDistribuidorId = null;
+    } else {
+      const obj = { 
+        id: Date.now(), 
+        nombre: nom, 
+        ciudad: ciu, 
+        direccion: dir, 
+        vendedores: ven, 
+        clientes: cli, 
+        supervisores: [...supervisoresTemp],
+        marcasAsignadas: marcasSeleccionadas
+      };
+      
+      if (db) {
+        await db.collection("distribuidores").doc(obj.id.toString()).set(obj);
+      } else {
+        distribuidores.push(obj); 
+        localStorage.setItem("distribuidores", JSON.stringify(distribuidores)); 
+      }
+      showToast("Distribuidor Creado");
+    }
+    
+    document.getElementById("config-dist-id").value = "";
+    document.getElementById("config-dist-nombre").value = ""; 
+    document.getElementById("config-dist-ciudad").value = ""; 
+    document.getElementById("config-dist-direccion").value = ""; 
+    document.getElementById("config-dist-vendedores").value = ""; 
+    document.getElementById("config-dist-clientes").value = ""; 
+    document.getElementById("config-sup-nombre").value = ""; 
+    document.getElementById("config-sup-tel").value = ""; 
+    
+    supervisoresTemp = []; 
+    renderSupTemp(); 
+    renderizarApp(); 
+    
+    switchTab('view-directorio', 'Directorio CRM'); 
+    cambiarVistaDir('distribuidores');
+  } catch (e) {
+    alert("Error de guardado: " + e.message);
+  }
+}
+
+// === EL GUARDADO MAESTRO DE VENDEDORES ===
+async function agregarVendedor() { 
+  const idEdit = document.getElementById("config-vend-id").value;
+  const distri = document.getElementById("config-vend-distri").value; 
+  const nombre = document.getElementById("config-vend-nombre").value.trim(); 
+  const doc = document.getElementById("config-vend-doc").value.trim(); 
+  const tel = document.getElementById("config-vend-tel").value.trim();
+  
+  if (!distri || !nombre || !tel) {
+    return alert("Empresa, Nombre y Teléfono son obligatorios."); 
+  }
+  
+  try {
+    if (idEdit) {
+      let ven = vendedores.find(v => v.id == idEdit);
+      if (ven) { 
+        ven.distribuidor = distri; 
+        ven.nombre = nombre; 
+        ven.documento = doc; 
+        ven.telefono = tel; 
+      }
+      if (db) {
+        await db.collection("vendedores").doc(idEdit.toString()).set(ven);
+      } else {
+        localStorage.setItem("vendedoresObj", JSON.stringify(vendedores));
+      }
+      showToast("Vendedor Actualizado");
+      editandoVendedorId = null;
+    } else {
+      const obj = { id: Date.now(), distribuidor: distri, nombre: nombre, documento: doc, telefono: tel };
+      if (db) {
+        await db.collection("vendedores").doc(obj.id.toString()).set(obj); 
+      } else {
+        vendedores.push(obj); 
+        localStorage.setItem("vendedoresObj", JSON.stringify(vendedores)); 
+      }
+      showToast("Vendedor Creado"); 
+    }
+    
+    document.getElementById("config-vend-id").value = "";
+    document.getElementById("config-vend-nombre").value = ""; 
+    document.getElementById("config-vend-doc").value = ""; 
+    document.getElementById("config-vend-tel").value = ""; 
+    
+    renderizarApp(); 
+    switchTab('view-directorio', 'Directorio CRM'); 
+    cambiarVistaDir('vendedores');
+  } catch(e) {
+    alert("Error: " + e.message);
+  }
+}
+
+// === EL GUARDADO DE MARCAS MULTICANAL ===
+async function agregarMarca() { 
+  const input = document.getElementById("nuevaMarca").value.trim(); 
+  if (!input) return;
+
+  // Las marcas son ahora strings globales (sin asignación de distribuidor directa)
+  // La asignación se hace por distribuidor en su formulario propio
+  if (marcas.some(m => { const n = (typeof m === 'object') ? m.nombre : m; return n.toLowerCase() === input.toLowerCase(); })) {
+    return alert("Esa marca ya existe en el portafolio.");
+  }
+
+  try {
+    if (db) {
+      marcas.push(input);
+      await db.collection("marcas").doc("globales").set({ lista: marcas });
+    } else {
+      marcas.push(input); 
+      localStorage.setItem("marcas", JSON.stringify(marcas)); 
+      renderizarApp(); 
+    }
+    document.getElementById("nuevaMarca").value = ""; 
+    showToast("Marca Agregada al Portafolio"); 
+  } catch(e) { 
+    alert("Error guardando marca: " + e.message); 
+  }
+}
+
+// ELIMINADOR MAESTRO (NUBE Y LOCAL)
+async function eliminarDato(tipo, id_o_nombre) { 
+  if (!confirm("¿Eliminar registro permanentemente?")) return; 
+  
+  try {
+    if (db) {
+      if (tipo === 'distribuidores') await db.collection("distribuidores").doc(id_o_nombre.toString()).delete();
+      if (tipo === 'vendedores') await db.collection("vendedores").doc(id_o_nombre.toString()).delete();
+      if (tipo === 'notas') await db.collection("notas").doc(id_o_nombre.toString()).delete();
+      
+      if (tipo === 'marcas') {
+        marcas = marcas.filter(m => m.nombre !== id_o_nombre);
+        await db.collection("marcas").doc("globales").set({ lista: marcas });
+      }
+    } else {
+      if (tipo === 'distribuidores') { 
+        distribuidores = distribuidores.filter(d => d.id !== id_o_nombre); 
+        localStorage.setItem("distribuidores", JSON.stringify(distribuidores)); 
+      }
+      if (tipo === 'vendedores') { 
+        vendedores = vendedores.filter(v => v.id !== id_o_nombre); 
+        localStorage.setItem("vendedoresObj", JSON.stringify(vendedores)); 
+      }
+      if (tipo === 'notas') { 
+        notasGlobales = notasGlobales.filter(n => n.id !== id_o_nombre); 
+        localStorage.setItem("notasGlobales", JSON.stringify(notasGlobales)); 
+      }
+      if (tipo === 'marcas') { 
+        marcas = marcas.filter(m => m.nombre !== id_o_nombre);
+        localStorage.setItem("marcas", JSON.stringify(marcas)); 
+      }
+      
+      renderizarApp();
+      if (tipo === 'distribuidores' || tipo === 'vendedores') renderizarDirectorio();
+      if (tipo === 'notas') renderizarNotasGlobales();
+    }
+    showToast("Eliminado con éxito");
+  } catch(e) { 
+    alert("Error eliminando: " + e.message); 
+  }
+}
+
+function guardarGCal() { 
+  let input = document.getElementById("gcal-id").value.trim(); 
+  if (input.includes('src="')) { 
+    const match = input.match(/src="([^"]+)"/); 
+    if (match) { 
+      try { 
+        const urlObj = new URL(match[1]); 
+        input = urlObj.searchParams.get("src") || input; 
+      } catch(e){} 
+    } 
+  } else if (input.startsWith("http")) { 
+    try { 
+      const urlObj = new URL(input); 
+      input = urlObj.searchParams.get("src") || input; 
+    } catch(e){} 
+  } 
+  googleCalendarId = input; 
+  localStorage.setItem("gcalId", googleCalendarId); 
+  showToast("Calendario Guardado"); 
+}
+
+function guardarGemini() { 
+  geminiApiKey = document.getElementById("gemini-key").value.trim(); 
+  localStorage.setItem("geminiKey", geminiApiKey); 
+  showToast("Clave IA Guardada"); 
+}
+
+function exportarBackup() { 
+  const data = { 
+    vendedoresObj: vendedores, 
+    marcas: marcas, 
+    visitas: visitas, 
+    distribuidores: distribuidores, 
+    gcalId: googleCalendarId, 
+    geminiKey: geminiApiKey, 
+    notas: notasGlobales 
+  }; 
+  const blob = new Blob([JSON.stringify(data)], {type: "application/json"}); 
+  const link = document.createElement("a"); 
+  link.href = URL.createObjectURL(blob); 
+  link.download = `Backup_GenommaLab_${getHoy()}.json`; 
+  link.click(); 
+}
+
+function importarBackup(event) { 
+  const file = event.target.files[0]; 
+  if(!file) return; 
+  
+  const reader = new FileReader(); 
+  reader.onload = function(e) { 
+    try { 
+      const data = JSON.parse(e.target.result); 
+      if (data.visitas) { 
+        localStorage.setItem("vendedoresObj", JSON.stringify(data.vendedoresObj || [])); 
+        localStorage.setItem("marcas", JSON.stringify(data.marcas || [])); 
+        localStorage.setItem("visitas", JSON.stringify(data.visitas || [])); 
+        localStorage.setItem("distribuidores", JSON.stringify(data.distribuidores || [])); 
+        localStorage.setItem("notasGlobales", JSON.stringify(data.notas || [])); 
+        
+        if (data.gcalId) localStorage.setItem("gcalId", data.gcalId); 
+        if (data.geminiKey) localStorage.setItem("geminiKey", data.geminiKey); 
+        
+        alert("Backup restaurado con éxito. Se recargará la aplicación."); 
+        location.reload(); 
+      } else { 
+        alert("Archivo JSON inválido."); 
+      } 
+    } catch(err) { 
+      alert("Error al leer archivo."); 
+    } 
+  }; 
+  reader.readAsText(file); 
+}
+
+// ==========================================
+// 11. DIRECTORIO CRM VISUAL (CONTACTOS Y EMPRESAS)
+// ==========================================
+function cambiarVistaDir(vista) {
+  document.getElementById('tab-dir-vend').classList.remove('active'); 
+  document.getElementById('tab-dir-dist').classList.remove('active'); 
+  document.getElementById('lista-directorio-vendedores').style.display = 'none'; 
+  document.getElementById('lista-directorio-distribuidores').style.display = 'none';
+  
+  if (vista === 'vendedores') { 
+    document.getElementById('tab-dir-vend').classList.add('active'); 
+    document.getElementById('lista-directorio-vendedores').style.display = 'block'; 
+  } else { 
+    document.getElementById('tab-dir-dist').classList.add('active'); 
+    document.getElementById('lista-directorio-distribuidores').style.display = 'block'; 
+  } 
+  renderizarDirectorio();
+}
+
+function renderizarDirectorio() {
+  const filtro = document.getElementById("buscar-directorio").value.toLowerCase();
+  
+  // VENDEDORES
+  const cVend = document.getElementById("lista-directorio-vendedores"); 
+  let todosLosContactos = [];
+
+  vendedores.forEach(v => { 
+    todosLosContactos.push({ ...v, tipo: 'Vendedor' }); 
+  });
+
+  distribuidores.forEach(d => {
+    if (d.supervisores && d.supervisores.length > 0) {
+      d.supervisores.forEach(s => {
+        todosLosContactos.push({ nombre: s.nombre, telefono: s.telefono, distribuidor: d.nombre, tipo: 'Supervisor' });
+      });
+    }
+  });
+
+  const contactosFiltrados = todosLosContactos.filter(c => c.nombre.toLowerCase().includes(filtro) || c.distribuidor.toLowerCase().includes(filtro));
+  
+  if (contactosFiltrados.length === 0) {
+    cVend.innerHTML = `<p style="text-align:center; color:#888;">Sin contactos registrados.</p>`;
+  } else {
+    let htmlContactos = "";
+    contactosFiltrados.forEach(c => {
+      const inicial = c.nombre.charAt(0).toUpperCase();
+      const colorBadge = c.tipo === 'Vendedor' ? 'var(--primary)' : '#673AB7'; 
+
+      const btnEditar = (c.tipo === 'Vendedor' && c.id) ? `<i class="fas fa-edit" style="color:#6c757d; cursor:pointer; font-size:1.1rem; margin-right:10px;" onclick="cargarEdicionVendedor(${c.id})"></i>` : "";
+      
+      htmlContactos += `
+      <div class="contacto-card">
+        <div class="contacto-header" style="justify-content: flex-start; gap: 15px;">
+          <div class="avatar" style="background:${colorBadge}">${inicial}</div>
+          <div style="flex:1;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+               <h4 style="margin:0;">${c.nombre}</h4>
+               <div>${btnEditar}</div>
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:2px;">
+              <span style="font-size:0.75rem; color:#888; font-weight:bold;">${c.distribuidor}</span>
+              <span class="badge-stats" style="background:${colorBadge}; padding:2px 6px; font-size:0.65rem;">${c.tipo}</span>
+            </div>
+          </div>
+        </div>
+        <div class="contacto-body">
+          ${c.documento ? `<p><i class="fas fa-id-card"></i> Doc: ${c.documento}</p>` : ''}
+          <p><i class="fas fa-phone"></i> Cel: ${c.telefono}</p>
+        </div>
+        <div class="contacto-actions">
+          <a href="tel:${c.telefono}" class="btn-llamar"><i class="fas fa-phone-alt"></i> Llamar</a>
+          <a href="https://wa.me/57${c.telefono}" target="_blank" class="btn-wa"><i class="fab fa-whatsapp"></i> WA</a>
+        </div>
+      </div>`;
+    });
+    cVend.innerHTML = htmlContactos;
+  }
+
+  // DISTRIBUIDORES
+  const cDist = document.getElementById("lista-directorio-distribuidores"); 
+  const distFiltrados = distribuidores.filter(d => d.nombre.toLowerCase().includes(filtro) || (d.ciudad && d.ciudad.toLowerCase().includes(filtro)));
+  
+  if (distFiltrados.length === 0) {
+    cDist.innerHTML = `<p style="text-align:center; color:#888;">Sin distribuidores.</p>`;
+  } else {
+    let htmlDist = "";
+    distFiltrados.forEach((d, i) => {
+      
+      const vendsDeDistri = vendedores.filter(v => v.distribuidor === d.nombre);
+      
+      let htmlVendedoresList = vendsDeDistri.length > 0 ? vendsDeDistri.map(v => `
+        <div class="sup-card" style="border-left:3px solid var(--primary); margin-top:5px; margin-bottom:5px;">
+          <b>${v.nombre}</b><br><small><i class="fas fa-phone"></i> ${v.telefono}</small>
+          <div class="contacto-actions" style="margin-top:8px;">
+            <a href="tel:${v.telefono}" class="btn-llamar" style="background:#007bff; padding:6px;"><i class="fas fa-phone-alt"></i></a>
+            <a href="https://wa.me/57${v.telefono}" target="_blank" class="btn-wa" style="padding:6px;"><i class="fab fa-whatsapp"></i> WA</a>
+          </div>
+        </div>`).join('') : '<p style="margin-top:10px; font-size:0.8rem; color:#999; text-align:center;">Sin vendedores asignados.</p>';
+
+      let htmlSupsList = (d.supervisores && d.supervisores.length > 0) ? d.supervisores.map(s => `
+        <div class="sup-card" style="border-left:3px solid #673AB7; margin-top:5px; margin-bottom:5px;">
+          <b>${s.nombre}</b><br><small><i class="fas fa-phone"></i> ${s.telefono}</small>
+          <div class="contacto-actions" style="margin-top:8px;">
+            <a href="tel:${s.telefono}" class="btn-llamar" style="background:#6c757d; padding:6px;"><i class="fas fa-phone-alt"></i></a>
+            <a href="https://wa.me/57${s.telefono}" target="_blank" class="btn-wa" style="padding:6px;"><i class="fab fa-whatsapp"></i> WA</a>
+          </div>
+        </div>`).join('') : '<p style="margin-top:10px; font-size:0.8rem; color:#999; text-align:center;">Sin supervisores asignados.</p>';
+
+      htmlDist += `
+      <div class="contacto-card" style="border-left-color:#673AB7; padding:0; overflow:hidden;">
+        
+        <div class="sesion-header" style="background:white; color:#333; border-bottom:1px solid #eee; padding:15px; display:flex; justify-content:space-between; align-items:center;">
+          <div style="flex:1; cursor:pointer;" onclick="toggleDirElement('dist-body-${i}', 'icon-dist-${i}')">
+             <h4 style="margin:0; color:#673AB7;"><i class="fas fa-truck"></i> ${d.nombre}</h4>
+          </div>
+          <div style="display:flex; gap:10px; align-items:center;">
+             <i class="fas fa-edit" style="color:#6c757d; font-size:1.1rem; cursor:pointer;" onclick="cargarEdicionDistribuidor(${d.id})"></i>
+             <i class="fas fa-chevron-down toggle-icon" id="icon-dist-${i}" style="color:#666; position:relative; right:0; top:0; cursor:pointer;" onclick="toggleDirElement('dist-body-${i}', 'icon-dist-${i}')"></i>
+          </div>
+        </div>
+        
+        <div id="dist-body-${i}" style="display:none; padding:15px; background:#fbfbfb;">
+          <p style="font-size:0.85rem; color:#666; margin-bottom:5px;"><i class="fas fa-map-marker-alt" style="width:20px; color:#673AB7; text-align:center;"></i> ${d.ciudad || 'N/A'}</p>
+          <p style="font-size:0.85rem; color:#666; margin-bottom:15px;"><i class="fas fa-map-signs" style="width:20px; color:#673AB7; text-align:center;"></i> ${d.direccion || 'N/A'}</p>
+          
+          <div style="margin-bottom:15px; font-size:0.85rem; text-align:center; background:#eee; padding:5px; border-radius:5px;">
+            <b>Clientes en maestra:</b> ${d.clientes || '0'}
+          </div>
+
+          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; margin-bottom:10px;">
+            <div style="padding:10px; cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="toggleDirElement('dist-vend-${i}', 'icon-vend-${i}')">
+              <span style="font-weight:bold; font-size:0.9rem; color:var(--primary);"><i class="fas fa-user-tie"></i> Vendedores de ruta (${vendsDeDistri.length})</span>
+              <i class="fas fa-chevron-down" id="icon-vend-${i}" style="color:#999; font-size:0.9rem;"></i>
+            </div>
+            <div id="dist-vend-${i}" style="display:none; padding:0 10px 10px 10px; border-top:1px solid #eee;">
+              ${htmlVendedoresList}
+            </div>
+          </div>
+
+          <div style="background:#fff; border:1px solid #ddd; border-radius:8px;">
+            <div style="padding:10px; cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="toggleDirElement('dist-sup-${i}', 'icon-sup-${i}')">
+              <span style="font-weight:bold; font-size:0.9rem; color:#673AB7;"><i class="fas fa-user-shield"></i> Supervisores a Cargo (${d.supervisores ? d.supervisores.length : 0})</span>
+              <i class="fas fa-chevron-down" id="icon-sup-${i}" style="color:#999; font-size:0.9rem;"></i>
+            </div>
+            <div id="dist-sup-${i}" style="display:none; padding:0 10px 10px 10px; border-top:1px solid #eee;">
+              ${htmlSupsList}
+            </div>
+          </div>
+        </div>
+      </div>`;
+    });
+    cDist.innerHTML = htmlDist;
+  }
+}
+
+// ==========================================
+// 12. GUARDAR VISITA AUDITORÍA (GPS)
+// ==========================================
+function guardarVisita() {
+  const distribuidor = document.getElementById("distribuidor").value; 
+  const vendedor = document.getElementById("vendedor").value; 
+  const zona = document.getElementById("zona").value.trim(); 
+  const tienda = document.getElementById("tienda").value.trim(); 
+  const notas = document.getElementById("notas-visita").value.trim();
+  
+  if(!distribuidor || !vendedor || !zona || !tienda) {
+    return alert("Llena campos obligatorios.");
+  }
+  
+  const btnGuardar = document.getElementById("btn-guardar"); 
+  btnGuardar.disabled = true; 
+  btnGuardar.innerHTML = '<i class="fas fa-spinner fa-spin"></i> GPS...';
+
+  if (!navigator.geolocation) { 
+    alert("Sin GPS. Se guardará sin coordenadas."); 
+    ejecutarGuardado(distribuidor, vendedor, zona, tienda, notas, "Sin datos", "Sin datos");
+    return; 
+  }
+  
+  navigator.geolocation.getCurrentPosition(
+    (position) => { 
+      ejecutarGuardado(distribuidor, vendedor, zona, tienda, notas, position.coords.latitude, position.coords.longitude); 
+    }, 
+    (error) => { 
+      alert("❌ GPS Falló. Asegúrate de dar permisos de ubicación."); 
+      ejecutarGuardado(distribuidor, vendedor, zona, tienda, notas, "Sin datos", "Sin datos");
+    }, 
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+function restaurarBoton() { 
+  const btnGuardar = document.getElementById("btn-guardar"); 
+  btnGuardar.disabled = false; 
+  btnGuardar.innerHTML = '<i class="fas fa-save"></i> Guardar Registro Definitivo'; 
+}
+
+async function ejecutarGuardado(distribuidor, vendedor, zona, tienda, notas, lat, lng) {
+  let resultados = []; 
+  document.querySelectorAll("#marcas-senso input[type='checkbox']").forEach(cb => { 
+    resultados.push({ marca: cb.dataset.marca, disponible: cb.checked }); 
+  });
+  
+  let popRecopilado = materialesPOP.map((pop, index) => ({ 
+    nombre: pop, 
+    presente: document.getElementById(`pop-${index}`) ? document.getElementById(`pop-${index}`).checked : false
+  }));
+  
+  let evalVisita = aspectosVisita.map((aspecto, index) => ({ 
+    aspecto, 
+    cumple: document.getElementById(`visita-${index}`).checked 
+  }));
+  
+  let evalDiaria = []; 
+  
+  const previas = visitas.filter(v => v.fechaISO === getHoy() && v.vendedor === vendedor);
+  if (previas.length === 0) { 
+    evalDiaria = aspectosDiarios.map((aspecto, index) => ({ 
+      aspecto, 
+      cumple: document.getElementById(`diario-${index}`).checked 
+    })); 
+  } else { 
+    evalDiaria = previas[0].evaluacionDiaria; 
+  }
+
+  let txtAnalisisFoto = ""; 
+  const boxIaFoto = document.getElementById("box-ia-foto"); 
+  if(boxIaFoto.style.display === "block") { 
+    txtAnalisisFoto = boxIaFoto.innerText; 
+  }
+  
+  // Nuevos campos
+  const comproPorGenomma = document.getElementById('compro-genomma')?.checked || false;
+  const comproPorDuracell = document.getElementById('compro-duracell')?.checked || false;
+  
+  const nuevaVisita = { 
+    id: Date.now(), 
+    fechaISO: getHoy(), 
+    hora: new Date().toLocaleTimeString('es-ES', {hour: '2-digit', minute:'2-digit'}), 
+    distribuidor, vendedor, zona, tienda, notas, lat, lng, 
+    resultados, pop: popRecopilado, evaluacionDiaria: evalDiaria, 
+    evaluacionVisita: evalVisita, fotoMin: fotoMinBase64, analisisVisual: txtAnalisisFoto,
+    comproPorGenomma, comproPorDuracell,
+    datoDiario: datoDiario ? { ...datoDiario } : null
+  };
+  
+  try {
+    if (db) {
+      await db.collection("visitas").doc(nuevaVisita.id.toString()).set(nuevaVisita);
+    } else {
+      visitas.push(nuevaVisita); 
+      localStorage.setItem("visitas", JSON.stringify(visitas));
+    }
+    
+    document.getElementById("tienda").value = ""; 
+    document.getElementById("notas-visita").value = ""; 
+    document.querySelectorAll("#marcas-senso input[type='checkbox']").forEach(cb => cb.checked = false); 
+    aspectosVisita.forEach((_, i) => document.getElementById(`visita-${i}`).checked = false); 
+    materialesPOP.forEach((_, i) => { 
+      const el = document.getElementById(`pop-${i}`); 
+      if (el) el.checked = false; 
+    });
+    if (document.getElementById('compro-genomma')) document.getElementById('compro-genomma').checked = false;
+    if (document.getElementById('compro-duracell')) document.getElementById('compro-duracell').checked = false;
+    
+    document.getElementById("foto-preview-container").style.display = "none"; 
+    document.getElementById("btn-ia-foto").style.display = "none"; 
+    boxIaFoto.style.display = "none"; 
+    
+    fotoBase64AI = null; 
+    fotoMinBase64 = null;
+    
+    // Limpiar estado guardado del formulario (solo los campos de tienda/notas/checks)
+    const stateStr = localStorage.getItem('formState');
+    if (stateStr) {
+      const state = JSON.parse(stateStr);
+      state.tienda = '';
+      state.notas = '';
+      state.comproPorGenomma = false;
+      state.comproPorDuracell = false;
+      state.marcasCheck = {};
+      state.visitaCheck = {};
+      state.popCheck = {};
+      localStorage.setItem('formState', JSON.stringify(state));
+    }
+    
+    verificarEvaluacionDiaria(); 
+    restaurarBoton(); 
+    showToast("Auditoría guardada con éxito");
+  } catch(e) {
+    alert("Error conectando con la base de datos: " + e.message);
+    restaurarBoton();
+  }
+}
+
+// ==========================================
+// 13. IA GOOGLE GEMINI (VISUAL, COACHING Y REPORTE)
+// ==========================================
+async function analizarFotoIA() {
+  if (!geminiApiKey) return alert("Configura API Key.");
+  
+  const btn = document.getElementById("btn-ia-foto"); 
+  const box = document.getElementById("box-ia-foto"); 
+  
+  btn.disabled = true; 
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analizando...'; 
+  box.style.display = "block"; 
+  box.innerHTML = '<span style="color:#673AB7;"><i class="fas fa-eye"></i> Escaneando foto...</span>';
+  
+  const base64Data = fotoBase64AI.split(',')[1];
+  
+  // Obtener marcas del distribuidor actual para el contexto
+  const distriSeleccionado = document.getElementById("distribuidor")?.value || "";
+  const distriObj = distribuidores.find(d => d.nombre === distriSeleccionado);
+  const vendeDuracell = distriObj && distriObj.marcasAsignadas && distriObj.marcasAsignadas.includes('Duracell');
+  const marcasDistri = (distriObj && distriObj.marcasAsignadas && distriObj.marcasAsignadas.length > 0)
+    ? distriObj.marcasAsignadas.join(', ')
+    : marcas.map(m => typeof m === 'object' ? m.nombre : m).join(', ');
+  
+  const duracellTxt = vendeDuracell 
+    ? "Este distribuidor SÍ vende Duracell, incluye análisis de exhibición de Duracell."
+    : "Este distribuidor NO vende Duracell, NO menciones Duracell en el análisis.";
+  
+  const prompt = `Eres Cesar Pescador, Gestor Sell Out de Genomma Lab. Analiza esta foto de exhibición en tienda.
+Las marcas auditadas de este distribuidor son: ${marcasDistri}.
+${duracellTxt}
+
+Realiza el siguiente análisis:
+1. PRESENCIA GENOMMA LAB: ¿Qué marcas del distribuidor se ven? ¿Están bien exhibidas? Menciona específicamente cada marca visible.
+2. ANÁLISIS POR MARCA: Para cada marca visible (${marcasDistri}), comenta brevemente su posición y visibilidad.
+3. COMPETENCIA DIRECTA DETECTADA: Revisa si hay presencia de estos productos de competencia (menciona SOLO los que detectes): Advil, Dolex, Advil Gripa, Electrolit, Energizer, Gaviscon, Pantene, Mieltertos. Si detectas alguno, indica su posición y nivel de amenaza.
+4. RECOMENDACIONES: 2 acciones concretas para mejorar la exhibición.
+
+Sé conciso y directo. Máximo 150 palabras en total.`;
+  
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({ contents: [{ parts:[ { text: prompt }, { inlineData: { mimeType: "image/jpeg", data: base64Data } } ] }] }) 
+    });
+    
+    if(!response.ok) throw new Error("Error HTTP"); 
+    
+    const data = await response.json(); 
+    let textHtml = data.candidates[0].content.parts[0].text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\*(.*?)\n/g, '<li>$1</li>').replace(/\n/g, '<br>');
+    
+    box.innerHTML = `<b><i class="fas fa-camera"></i> Evaluación Visual IA:</b><br>${textHtml}`; 
+    btn.innerHTML = '<i class="fas fa-redo"></i> Re-analizar Foto';
+    btn.disabled = false;
+  } catch(e) { 
+    box.innerHTML = `<span style="color:red;">Error IA: ${e.message}</span>`; 
+    btn.disabled = false; 
+    btn.innerHTML = '<i class="fas fa-magic"></i> Reintentar'; 
+  }
+}
+
+async function generarAnalisisIA(nombreVendedor, tiendas, pctMarcas, pctDiaria, pctVisita, indexBoton, popLogros, impGenomma, valGenomma, impDuracell, valDuracell, vendeDuracell) {
+  if (!geminiApiKey) return alert("Configura API Key.");
+  
+  const objVendedor = vendedores.find(v => v.nombre === nombreVendedor); 
+  const telefonoUrl = objVendedor && objVendedor.telefono ? `57${objVendedor.telefono}` : "";
+  
+  const btn = document.getElementById(`btn-ia-${indexBoton}`); 
+  const box = document.getElementById(`box-ia-${indexBoton}`); 
+  
+  btn.disabled = true; 
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Feedback...'; 
+  box.style.display = 'block'; 
+  box.innerHTML = '<span style="color:#673AB7;"><i class="fas fa-magic"></i> Procesando...</span>';
+
+  let popTxt = popLogros > 0 ? `Logró POP en ${popLogros} tiendas, felicítalo.` : "";
+  
+  let ventasTxt = `Genomma Lab: ${impGenomma || 0} impactos de compra, valor $${Number(valGenomma||0).toLocaleString('es-CO')}.`;
+  if (vendeDuracell) {
+    ventasTxt += ` Duracell: ${impDuracell || 0} impactos de compra, valor $${Number(valDuracell||0).toLocaleString('es-CO')}.`;
+  }
+  
+  const prompt = `Actúa como Cesar Pescador, Gestor Sell Out Genomma Lab. Escribe un WhatsApp motivador y de coaching a ${nombreVendedor}. Auditaste ${tiendas} tiendas hoy. Meta: ganar concursos. Efectividad marcas: ${pctMarcas}%. Tácticas: ${pctVisita}%. Presentación/Catálogo: ${pctDiaria}%. Ventas del día: ${ventasTxt} ${popTxt} Estructura: 1. Saludo personalizado. 2. Análisis numérico de resultados. 3. "GUION GENOMMA LAB": 1.Saludo, 2.Posicionamiento, 3.Reconocimiento, 4.Apertura comercial, 5.Despedida icónica. 4. Plan de 3 pasos para mañana. 5. Firma. Tono: cercano, motivador, profesional.`;
+  
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({ contents: [{ parts:[{ text: prompt }] }] }) 
+    });
+    
+    if(!response.ok) throw new Error("Error HTTP"); 
+    
+    const data = await response.json(); 
+    let textRaw = data.candidates[0].content.parts[0].text; 
+    let whatsappText = encodeURIComponent(textRaw); 
+    let textHtml = textRaw.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\*(.*?)\n/g, '<li>$1</li>').replace(/\n/g, '<br>');
+    
+    box.innerHTML = `<div style="font-size:1.1rem; margin-bottom:10px; color:#673AB7; border-bottom:1px solid #ce93d8; padding-bottom:5px;"><b><i class="fas fa-user-tie"></i> Coaching Genomma Lab:</b></div> <div style="color:#333; font-size:0.95rem; margin-bottom: 15px;">${textHtml}</div><button class="btn-primary" style="background:#25D366; padding:10px; font-size:1rem; border-radius:8px;" onclick="window.open('https://wa.me/${telefonoUrl}?text=${whatsappText}', '_blank')"><i class="fab fa-whatsapp"></i> Enviar WhatsApp</button>`; 
+    btn.innerHTML = '<i class="fas fa-check"></i> Generado';
+  } catch(error) { 
+    box.innerHTML = `<div style="color:red; font-size:0.9rem;"><b>Error:</b> ${error.message}</div>`; 
+    btn.disabled = false; 
+    btn.innerHTML = '<i class="fas fa-sync"></i> Reintentar'; 
+  }
+}
+
+async function generarReporteGerencial() {
+  if (!geminiApiKey) return alert("Configura API Key."); 
+  
+  const datos = obtenerDatosFiltrados().principal; 
+  if (datos.length === 0) return alert("Sin datos.");
+  
+  const box = document.getElementById("box-reporte-gerencia"); 
+  const btn = document.getElementById("btn-reporte-gerencia"); 
+  
+  btn.disabled = true; 
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analizando...'; 
+  box.style.display = 'block'; 
+  box.innerHTML = '<span style="color:#673AB7;"><i class="fas fa-cog fa-spin"></i> Consolidando...</span>';
+
+  // Consolidar estadísticas
+  let totalTiendas = datos.length; 
+  let vendedoresActivos = [...new Set(datos.map(v => v.vendedor))].join(", ");
+  let distribuidoresAuditados = [...new Set(datos.map(v => v.distribuidor))].join(", ");
+  let observaciones = datos.map(v => v.notas).filter(n => n && n.length > 3).join(". "); 
+  if(!observaciones) observaciones = "Sin novedades reportadas.";
+  
+  // Análisis de fotos
+  let analisisFotos = datos.map(v => v.analisisVisual).filter(a => a && a.length > 10).join(". ");
+  if (!analisisFotos) analisisFotos = "Sin análisis visual disponible en este período.";
+  
+  // Impactos de compra
+  let totalImpGenomma = 0, totalImpDuracell = 0;
+  datos.forEach(v => {
+    if (v.comproPorGenomma) totalImpGenomma++;
+    if (v.comproPorDuracell) totalImpDuracell++;
+  });
+  
+  // Marcas con menor presencia
+  let marcaBajaPresencia = '';
+  let marcaStats = {};
+  datos.forEach(v => {
+    if (v.resultados) v.resultados.forEach(r => {
+      if (!marcaStats[r.marca]) marcaStats[r.marca] = { t: 0, c: 0 };
+      marcaStats[r.marca].t++;
+      if (r.disponible) marcaStats[r.marca].c++;
+    });
+  });
+  const marcasOrdenadas = Object.keys(marcaStats).sort((a, b) => (marcaStats[a].c / marcaStats[a].t) - (marcaStats[b].c / marcaStats[b].t));
+  if (marcasOrdenadas.length > 0) {
+    marcaBajaPresencia = marcasOrdenadas.slice(0, 2).map(m => `${m} (${Math.round((marcaStats[m].c/marcaStats[m].t)*100)}%)`).join(', ');
+  }
+  
+  // Dato diario
+  const infoDia = datos[0]?.datoDiario || datoDiario || {};
+  const codigoRuta = infoDia.codigo || 'N/D';
+  const numClientesRuta = infoDia.numClientes || '-';
+  const agotadosDia = infoDia.agotados && infoDia.agotados.length > 0 ? infoDia.agotados.join(', ') : 'Ninguno';
+  
+  const prompt = `Eres Cesar Pescador, Gestor Sell Out de Genomma Lab. Escribe un reporte breve y conciso para el SUPERVISOR de la ruta (no para gerencia). El supervisor necesita información operativa rápida para tomar decisiones en el día.
+
+DATOS DE LA JORNADA:
+- Ruta: ${codigoRuta} | Clientes en ruta: ${numClientesRuta}
+- Tiendas auditadas hoy: ${totalTiendas}
+- Vendedores acompañados: ${vendedoresActivos}
+- Distribuidores: ${distribuidoresAuditados}
+- Impactos de compra Genomma: ${totalImpGenomma}
+- Impactos de compra Duracell: ${totalImpDuracell}
+- Marcas con menor presencia: ${marcaBajaPresencia || 'N/D'}
+- Productos agotados en ruta: ${agotadosDia}
+- Novedades de campo: ${observaciones}
+- Análisis visual de exhibiciones (resumen): ${analisisFotos.substring(0, 500)}
+
+Estructura del reporte (máximo 200 palabras, directo y útil):
+1. RESUMEN EJECUTIVO (2-3 líneas)
+2. ALERTA PRINCIPAL (lo más urgente que el supervisor debe atender HOY)
+3. OPORTUNIDADES DETECTADAS (máximo 2)
+4. OBSERVACIÓN VISUAL (basado en el análisis de fotos: competencia detectada, exhibición)
+5. ACCIÓN REQUERIDA AL SUPERVISOR (1 acción concreta)
+
+Tono: directo, operativo, sin relleno. El supervisor recibe este informe en su celular.`;
+  
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({ contents: [{ parts:[{ text: prompt }] }] }) 
+    });
+    
+    if(!response.ok) throw new Error("Error HTTP"); 
+    
+    const data = await response.json(); 
+    let textRaw = data.candidates[0].content.parts[0].text;
+    let textHtml = textRaw.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\*(.*?)\n/g, '<li>$1</li>').replace(/\n/g, '<br>');
+    
+    // Auto-guardar
+    const nuevoInforme = {
+      id: Date.now(),
+      tipo: 'supervisor',
+      fecha: getHoy(),
+      horaGuardado: new Date().toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'}),
+      texto: textHtml,
+      textoPlano: textRaw
+    };
+    informesGuardados.push(nuevoInforme);
+    localStorage.setItem('informesGuardados', JSON.stringify(informesGuardados));
+    
+    const waText = encodeURIComponent(textRaw);
+    box.innerHTML = `
+      <div style="font-size:1rem; margin-bottom:10px; color:#673AB7; border-bottom:1px solid #ce93d8; padding-bottom:5px;">
+        <b><i class="fas fa-user-shield"></i> Reporte Supervisor:</b>
+        <span style="font-size:0.7rem; color:#888; float:right; margin-top:3px;"><i class="fas fa-check-circle" style="color:#28a745;"></i> Guardado</span>
+      </div>
+      <div style="color:#333; font-size:0.9rem; margin-bottom:12px;">${textHtml}</div>
+      <button class="btn-primary" style="padding:10px; font-size:0.9rem; background:#25D366;" onclick="window.open('https://wa.me/?text=${waText}','_blank')">
+        <i class="fab fa-whatsapp"></i> Enviar por WhatsApp
+      </button>`; 
+    btn.innerHTML = '<i class="fas fa-check"></i> Reporte Generado';
+    box.dataset.textRaw = textHtml;
+    
+  } catch(error) { 
+    box.innerHTML = `<div style="color:red;"><b>Error:</b> ${error.message}</div>`; 
+    btn.disabled = false; 
+    btn.innerHTML = '<i class="fas fa-magic"></i> Reintentar Reporte'; 
+  }
+}
+
+function guardarInformeIA(fecha, btnEl) {
+  const box = document.getElementById("box-reporte-gerencia");
+  const textHtml = box.dataset.textRaw || box.innerHTML;
+  
+  const nuevoInforme = {
+    id: Date.now(),
+    fecha: fecha,
+    horaGuardado: new Date().toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'}),
+    texto: textHtml
+  };
+  
+  informesGuardados.push(nuevoInforme);
+  localStorage.setItem('informesGuardados', JSON.stringify(informesGuardados));
+  
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i class="fas fa-check"></i> Guardado'; }
+  showToast('Informe guardado en historial');
+}
+
+// ==========================================
+// 14. CALENDARIO E HISTORIAL DE AUDITORÍA
+// ==========================================
+function cambiarVistaCalendario(vista) {
+  document.getElementById('tab-historial').classList.remove('active'); 
+  document.getElementById('tab-google').classList.remove('active'); 
+  document.getElementById('contenedor-historial').style.display = 'none'; 
+  document.getElementById('contenedor-google').style.display = 'none';
+  
+  if (vista === 'historial') { 
+    document.getElementById('tab-historial').classList.add('active'); 
+    document.getElementById('contenedor-historial').style.display = 'block'; 
+    mostrarRegistrosPorFecha(); 
+  } else { 
+    document.getElementById('tab-google').classList.add('active'); 
+    document.getElementById('contenedor-google').style.display = 'block'; 
+    mostrarGoogleCalendar(); 
+  }
+}
+
+function mostrarGoogleCalendar() {
+  const container = document.getElementById("gcal-iframe-container");
+  if (!googleCalendarId) {
+    container.innerHTML = `<div style="padding: 20px; text-align: center; color: #888;"><i class="fas fa-exclamation-triangle" style="font-size: 2rem; color:#f39c12; margin-bottom:10px;"></i><br>Configura Google Calendar en Ajustes.</div>`;
+    return;
+  }
+  container.innerHTML = `<iframe src="https://calendar.google.com/calendar/embed?src=${encodeURIComponent(googleCalendarId)}&mode=AGENDA&showTitle=0&showNav=1&showDate=0&showPrint=0&showTabs=0&showCalendars=0&showTz=0" style="border: 0" width="100%" height="400" frameborder="0" scrolling="yes"></iframe>`;
+}
+
+function mostrarRegistrosPorFecha() {
+  const fechaFiltro = document.getElementById('fecha-filtro').value; 
+  const contenedor = document.getElementById("lista-registros"); 
+  const visitasDelDia = visitas.filter(v => v.fechaISO === fechaFiltro);
+  
+  if (visitasDelDia.length === 0) {
+    contenedor.innerHTML = `<p style="text-align:center; color:#888; margin-top:20px;">No hay registros en esta fecha.</p>`;
+    return;
+  }
+  
+  const grupos = {}; 
+  visitasDelDia.forEach(v => { 
+    const clave = `${v.distribuidor}|${v.vendedor}`; 
+    if(!grupos[clave]) grupos[clave] = []; 
+    grupos[clave].push(v); 
+  });
+
+  let htmlResult = "";
+  Object.keys(grupos).forEach((clave, index) => {
+    const grupo = grupos[clave]; 
+    const datos = grupo[0]; 
+    const horaInicio = grupo[0].hora; 
+    const horaFin = grupo[grupo.length - 1].hora;
+    
+    const zonasUnicas = [...new Set(grupo.map(v => v.zona))].join(", ");
+    
+    let tMarcas = 0, cMarcas = 0; 
+    let tVisitas = 0, cVisitas = 0; 
+    let countPop = 0;
+    let countComproGenomma = 0;
+    let countComproDuracell = 0;
+    
+    grupo.forEach(v => { 
+      v.resultados.forEach(r => { tMarcas++; if(r.disponible) cMarcas++; }); 
+      if(v.evaluacionVisita) v.evaluacionVisita.forEach(e => { tVisitas++; if(e.cumple) cVisitas++; }); 
+      if(v.pop) v.pop.forEach(p => { if(p.presente) countPop++; });
+      if(v.comproPorGenomma) countComproGenomma++;
+      if(v.comproPorDuracell) countComproDuracell++;
+    });
+    
+    let tDiaria = datos.evaluacionDiaria ? datos.evaluacionDiaria.length : 0; 
+    let cDiaria = datos.evaluacionDiaria ? datos.evaluacionDiaria.filter(e => e.cumple).length : 0;
+    
+    const pctMarcas = tMarcas ? Math.round((cMarcas/tMarcas)*100) : 0; 
+    const pctDiaria = tDiaria ? Math.round((cDiaria/tDiaria)*100) : 0; 
+    const pctVisita = tVisitas ? Math.round((cVisitas/tVisitas)*100) : 0;
+
+    // Obtener si este distribuidor vende Duracell
+    const distriObj = distribuidores.find(d => d.nombre === datos.distribuidor);
+    const vendeDuracell = distriObj && distriObj.marcasAsignadas && distriObj.marcasAsignadas.includes('Duracell');
+    
+    // Recuperar datos editables guardados
+    const claveEdit = `${fechaFiltro}|${datos.distribuidor}|${datos.vendedor}`;
+    const editData = datosHistorialEdit[claveEdit] || {};
+    const impGenomma = editData.impactosGenomma !== undefined ? editData.impactosGenomma : countComproGenomma;
+    const valGenomma = editData.valorGenomma !== undefined ? editData.valorGenomma : 0;
+    const impDuracell = editData.impactosDuracell !== undefined ? editData.impactosDuracell : countComproDuracell;
+    const valDuracell = editData.valorDuracell !== undefined ? editData.valorDuracell : 0;
+    
+    // Datos de ruta
+    const infDia = datos.datoDiario || datoDiario || {};
+    const numClientesRuta = infDia.numClientes || grupo.length;
+    const codigoRuta = infDia.codigo || '-';
+
+    const duracellEditHtml = vendeDuracell ? `
+      <div style="background:#e8f5e9; border-radius:8px; padding:10px; margin-bottom:8px;">
+        <b style="color:#1D6F42; font-size:0.85rem;"><i class="fas fa-battery-full"></i> Duracell</b>
+        <div style="display:flex; gap:8px; margin-top:5px;">
+          <div style="flex:1;">
+            <label style="font-size:0.75rem; color:#666; margin-bottom:3px; display:block;">Impactos</label>
+            <input type="number" id="edit-imp-duracell-${index}" value="${impDuracell}" style="width:100%; padding:6px; border-radius:6px; border:1px solid #ccc; font-size:0.9rem;" min="0">
+          </div>
+          <div style="flex:1;">
+            <label style="font-size:0.75rem; color:#666; margin-bottom:3px; display:block;">Valor $</label>
+            <input type="number" id="edit-val-duracell-${index}" value="${valDuracell}" style="width:100%; padding:6px; border-radius:6px; border:1px solid #ccc; font-size:0.9rem;" min="0">
+          </div>
+        </div>
+      </div>` : '';
+
+    htmlResult += `
+      <div class="sesion-card">
+        <div class="sesion-header" onclick="toggleDetalles(${index})">
+          <h4><i class="fas fa-route"></i> ${datos.vendedor}</h4>
+          <p><i class="fas fa-map-marker-alt"></i> Zonas: ${zonasUnicas}</p>
+          <p><i class="fas fa-truck"></i> Dist: ${datos.distribuidor}</p>
+          <p><i class="fas fa-road"></i> Ruta: ${codigoRuta} | Clientes: ${numClientesRuta}</p>
+          <p><i class="fas fa-clock"></i> ${horaInicio} - ${horaFin}</p>
+          <span class="badge-stats">Tiendas Auditadas: ${grupo.length}</span>
+          <i class="fas fa-chevron-down toggle-icon" id="icon-${index}"></i>
+        </div>
+        <div class="sesion-detalles" id="detalles-${index}">
+          <div class="resumen-ruta">
+            <h5>📊 Resumen Laboral</h5>
+            <div class="stat-line"><span>Marcas Genomma Lab:</span> <strong>${pctMarcas}%</strong></div>
+            <div class="stat-line"><span>Presentación (1ra visita):</span> <strong>${pctDiaria}%</strong></div>
+            <div class="stat-line"><span>Guion de Visita (Tácticas):</span> <strong style="color:var(--eval);">${pctVisita}%</strong></div>
+            <div class="stat-line"><span><i class="fas fa-pills"></i> Impactos Genomma:</span> <strong style="color:var(--primary);">${impGenomma}</strong></div>
+            ${vendeDuracell ? `<div class="stat-line" style="border:none;"><span><i class="fas fa-battery-full"></i> Impactos Duracell:</span> <strong style="color:#1D6F42;">${impDuracell}</strong></div>` : ''}
+          </div>
+          
+          <!-- CAMPOS EDITABLES GENOMMA / DURACELL -->
+          <div style="background:#f9f9f9; border:1px solid #ddd; border-radius:10px; padding:12px; margin-bottom:12px;">
+            <h5 style="color:var(--primary); margin-bottom:10px;"><i class="fas fa-edit"></i> Datos de Venta (Editable)</h5>
+            
+            <div style="background:#e8f0fe; border-radius:8px; padding:10px; margin-bottom:8px;">
+              <b style="color:var(--primary); font-size:0.85rem;"><i class="fas fa-pills"></i> Genomma Lab</b>
+              <div style="display:flex; gap:8px; margin-top:5px;">
+                <div style="flex:1;">
+                  <label style="font-size:0.75rem; color:#666; margin-bottom:3px; display:block;">Impactos</label>
+                  <input type="number" id="edit-imp-genomma-${index}" value="${impGenomma}" style="width:100%; padding:6px; border-radius:6px; border:1px solid #ccc; font-size:0.9rem;" min="0">
+                </div>
+                <div style="flex:1;">
+                  <label style="font-size:0.75rem; color:#666; margin-bottom:3px; display:block;">Valor Venta $</label>
+                  <input type="number" id="edit-val-genomma-${index}" value="${valGenomma}" style="width:100%; padding:6px; border-radius:6px; border:1px solid #ccc; font-size:0.9rem;" min="0">
+                </div>
+              </div>
+            </div>
+            
+            ${duracellEditHtml}
+            
+            <button onclick="guardarEditHistorial('${claveEdit}', ${index}, ${vendeDuracell})" 
+              class="btn-primary" style="padding:8px; font-size:0.85rem; background:#28a745; margin-top:5px;">
+              <i class="fas fa-save"></i> Guardar Datos
+            </button>
+          </div>
+          
+          <div style="display:flex; gap:10px; margin-bottom:15px;">
+            <button id="btn-ia-${index}" class="btn-primary" style="flex:1; background:#673AB7; padding:10px; font-size:0.9rem;" onclick="generarAnalisisIA('${datos.vendedor}', ${grupo.length}, ${pctMarcas}, ${pctDiaria}, ${pctVisita}, ${index}, ${countPop}, ${impGenomma}, ${valGenomma}, ${impDuracell}, ${valDuracell}, ${vendeDuracell})"><i class="fas fa-magic"></i> Feedback de Coaching</button>
+          </div>
+          <div id="box-ia-${index}" class="ai-report-box" style="display:none;"></div>
+          
+          ${grupo.map(reg => {
+            const resumenMarcas = reg.resultados.map(r => `<span class="${r.disponible ? 'badge-green' : 'badge-red'}">${r.disponible ? '✔' : '✖'} ${r.marca}</span>`).join(' | ');
+            const resumenPop = reg.pop && reg.pop.filter(p=>p.presente).length > 0 ? `<div style="font-size:0.8rem; color:#17a2b8; font-weight:bold; margin-top:3px;"><i class="fas fa-box-open"></i> POP: ` + reg.pop.filter(p=>p.presente).map(p=>p.nombre).join(', ') + `</div>` : ``;
+            let cumplidosVisita = reg.evaluacionVisita ? reg.evaluacionVisita.filter(c => c.cumple).length : 0; 
+            let totalVisita = reg.evaluacionVisita ? reg.evaluacionVisita.length : 0;
+            let btnMapa = reg.lat ? `<a href="https://www.google.com/maps/search/?api=1&query=${reg.lat},${reg.lng}" target="_blank" class="link-mapa"><i class="fas fa-map-marker-alt"></i> Mapa</a>` : ``;
+            let txtNotas = reg.notas ? `<div style="font-size:0.8rem; background:#fff3cd; padding:5px; border-radius:5px; margin-top:5px;"><i class="fas fa-comment-dots"></i> ${reg.notas}</div>` : '';
+            let fotoHTML = reg.fotoMin ? `<div style="margin-top:8px;"><img src="${reg.fotoMin}" style="width:50px; border-radius:5px; border:1px solid #ccc;"></div>` : '';
+            let iaVisualHTML = '';
+            if (reg.analisisVisual && reg.analisisVisual.length > 10) {
+              const iaId = `ia-text-${reg.id}`;
+              iaVisualHTML = `
+                <div style="margin-top:6px;">
+                  <button onclick="toggleDirElement('${iaId}','icon-${iaId}')" style="background:#e8eaf6; border:none; border-radius:6px; padding:5px 10px; font-size:0.75rem; color:#4a148c; cursor:pointer; display:flex; align-items:center; gap:6px; width:100%;">
+                    ${reg.fotoMin ? `<img src="${reg.fotoMin}" style="width:30px; height:30px; border-radius:4px; object-fit:cover; flex-shrink:0;">` : ''}
+                    <span><i class="fas fa-robot" style="margin-right:3px;"></i> Análisis IA Visual</span>
+                    <i class="fas fa-chevron-down" id="icon-${iaId}" style="margin-left:auto; font-size:0.75rem;"></i>
+                  </button>
+                  <div id="${iaId}" style="display:none; background:#f3e5f5; border-radius:0 0 6px 6px; padding:8px; font-size:0.78rem; color:#4a148c; line-height:1.5; border:1px solid #ce93d8; border-top:none;">
+                    ${reg.analisisVisual.replace(/\n/g,'<br>')}
+                    ${reg.fotoMin ? `<div style="margin-top:8px;"><img src="${reg.fotoMin}" style="max-width:100%; border-radius:6px; border:1px solid #ccc;"></div>` : ''}
+                  </div>
+                </div>`;
+            } else if (reg.fotoMin) {
+              iaVisualHTML = `<div style="margin-top:8px;"><img src="${reg.fotoMin}" style="width:50px; border-radius:5px; border:1px solid #ccc;"></div>`;
+            }
+            let comprasBadge = '';
+            if (reg.comproPorGenomma) comprasBadge += `<span style="background:#e8f0fe; color:var(--primary); padding:2px 6px; border-radius:10px; font-size:0.75rem; margin-right:4px;"><i class="fas fa-pills"></i> Genomma</span>`;
+            if (reg.comproPorDuracell) comprasBadge += `<span style="background:#e8f5e9; color:#1D6F42; padding:2px 6px; border-radius:10px; font-size:0.75rem;"><i class="fas fa-battery-full"></i> Duracell</span>`;
+            
+            return `
+            <div class="registro-card">
+              <div style="font-weight:bold; margin-bottom:3px;"><i class="fas fa-store"></i> ${reg.tienda} <span style="font-weight:normal; font-size:0.75rem; color:#888;">(${reg.zona})</span> ${btnMapa}</div>
+              <div style="font-size:0.8rem; color:#666; margin-bottom:5px;">Hora: ${reg.hora}</div>
+              <div style="font-size:0.85rem; margin-bottom:5px;">${resumenMarcas}</div>
+              ${resumenPop}
+              <div style="font-size:0.8rem; color:var(--eval); font-weight:bold; margin-top:5px;"><i class="fas fa-star"></i> Tácticas: ${cumplidosVisita}/${totalVisita}</div>
+              ${comprasBadge ? `<div style="margin-top:5px;">${comprasBadge}</div>` : ''}
+              ${txtNotas}
+              ${iaVisualHTML}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  });
+  
+  contenedor.innerHTML = htmlResult;
+}
+
+function guardarEditHistorial(claveEdit, index, vendeDuracell) {
+  const impGenomma = parseFloat(document.getElementById(`edit-imp-genomma-${index}`)?.value || 0);
+  const valGenomma = parseFloat(document.getElementById(`edit-val-genomma-${index}`)?.value || 0);
+  
+  datosHistorialEdit[claveEdit] = {
+    impactosGenomma: impGenomma,
+    valorGenomma: valGenomma
+  };
+  
+  if (vendeDuracell) {
+    const impDuracell = parseFloat(document.getElementById(`edit-imp-duracell-${index}`)?.value || 0);
+    const valDuracell = parseFloat(document.getElementById(`edit-val-duracell-${index}`)?.value || 0);
+    datosHistorialEdit[claveEdit].impactosDuracell = impDuracell;
+    datosHistorialEdit[claveEdit].valorDuracell = valDuracell;
+  }
+  
+  localStorage.setItem('datosHistorialEdit', JSON.stringify(datosHistorialEdit));
+  showToast('Datos de venta guardados');
+}
+
+function toggleDetalles(index) { 
+  const det = document.getElementById(`detalles-${index}`); 
+  const ico = document.getElementById(`icon-${index}`); 
+  det.classList.toggle("show"); 
+  ico.classList.toggle("fa-chevron-up"); 
+  ico.classList.toggle("fa-chevron-down"); 
+}
+
+function exportarExcel() {
+  const datosExport = obtenerDatosFiltrados().principal; 
+  if (datosExport.length === 0) return alert("No hay registros en el filtro seleccionado.");
+  
+  let csvContent = "\uFEFF"; 
+  let encabezados = ["Fecha", "Hora", "Distribuidor", "Vendedor", "Ruta_Codigo", "Ruta_Clientes", "Zona", "Tienda", "Notas_Competencia", "Latitud", "Longitud", "Compro_Genomma", "Compro_Duracell", "IA_Visual_Exhibicion"];
+  
+  marcas.map(m => typeof m === 'object' ? m.nombre : m).forEach(m => encabezados.push(m)); 
+  materialesPOP.forEach(p => encabezados.push(`[POP] ${p}`)); 
+  aspectosDiarios.forEach(a => encabezados.push(`[DIARIA] ${a}`)); 
+  aspectosVisita.forEach(a => encabezados.push(`[VISITA] ${a}`));
+  
+  csvContent += encabezados.join(";") + "\r\n";
+  
+  datosExport.forEach(v => {
+    let txtIA = v.analisisVisual ? v.analisisVisual.replace(/<[^>]*>?/gm, '').replace(/(\r\n|\n|\r)/gm, " ") : "Sin Análisis";
+    const infDia = v.datoDiario || {};
+    let fila = [
+      v.fechaISO, v.hora, `"${v.distribuidor}"`, `"${v.vendedor}"`,
+      `"${infDia.codigo || ''}"`, (infDia.numClientes || ''),
+      `"${v.zona}"`, `"${v.tienda}"`, `"${v.notas || ''}"`,
+      (v.lat || "Sin datos"), (v.lng || "Sin datos"),
+      v.comproPorGenomma ? "SI" : "NO",
+      v.comproPorDuracell ? "SI" : "NO",
+      `"${txtIA}"`
+    ];
+    
+    marcas.forEach(marca => { 
+      const nombre = typeof marca === 'object' ? marca.nombre : marca;
+      const r = v.resultados.find(x => x.marca === nombre); 
+      fila.push(r ? (r.disponible ? "SI" : "NO") : "N/A"); 
+    });
+    
+    materialesPOP.forEach(pop => { 
+      if(v.pop) { 
+        const p = v.pop.find(x => x.nombre === pop); 
+        fila.push(p && p.presente ? "SI" : "NO"); 
+      } else { 
+        fila.push("N/A"); 
+      } 
+    });
+    
+    aspectosDiarios.forEach(aspecto => { 
+      if(v.evaluacionDiaria) { 
+        const c = v.evaluacionDiaria.find(x => x.aspecto === aspecto); 
+        fila.push(c && c.cumple ? "SI" : "NO"); 
+      } else { 
+        fila.push("N/A"); 
+      } 
+    });
+    
+    aspectosVisita.forEach(aspecto => { 
+      if(v.evaluacionVisita) { 
+        const c = v.evaluacionVisita.find(x => x.aspecto === aspecto); 
+        fila.push(c && c.cumple ? "SI" : "NO"); 
+      } else { 
+        fila.push("N/A"); 
+      } 
+    });
+    
+    csvContent += fila.join(";") + "\r\n";
+  });
+  
+  const link = document.createElement("a"); 
+  link.href = URL.createObjectURL(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })); 
+  link.download = `Auditorias_GenommaLab.csv`; 
+  link.click();
+}
+
+// ==========================================
+// 15. ESTADÍSTICAS Y PANEL DE CONTROL
+// ==========================================
+function cambiarVistaStats(vista) {
+  document.getElementById('tab-stat-clasico').classList.remove('active'); 
+  document.getElementById('tab-stat-dash').classList.remove('active'); 
+  document.getElementById('tab-stat-powerbi').classList.remove('active'); 
+  
+  document.getElementById('stats-clasico').style.display = 'none'; 
+  document.getElementById('stats-dashboard').style.display = 'none'; 
+  document.getElementById('stats-powerbi').style.display = 'none';
+  
+  if (vista === 'clasico') { 
+    document.getElementById('tab-stat-clasico').classList.add('active'); 
+    document.getElementById('stats-clasico').style.display = 'block'; 
+  } else if (vista === 'powerbi') { 
+    document.getElementById('tab-stat-powerbi').classList.add('active'); 
+    document.getElementById('stats-powerbi').style.display = 'block'; 
+  } else { 
+    document.getElementById('tab-stat-dash').classList.add('active'); 
+    document.getElementById('stats-dashboard').style.display = 'block'; 
+    actualizarEstadisticas(); 
+  }
+}
+
+function cambiarFiltroStats() {
+  const tipo = document.getElementById("tipo-filtro-stats").value; 
+  document.getElementById("filtro-stat-dia").style.display = tipo === 'hoy' ? 'block' : 'none'; 
+  document.getElementById("filtro-stat-mes").style.display = tipo === 'mes' ? 'block' : 'none'; 
+  document.getElementById("filtro-stat-inicio").style.display = tipo === 'rango' ? 'block' : 'none'; 
+  document.getElementById("filtro-stat-fin").style.display = tipo === 'rango' ? 'block' : 'none'; 
+  actualizarEstadisticas();
+}
+
+function obtenerDatosFiltrados() {
+  const tipo = document.getElementById("tipo-filtro-stats").value; 
+  let arrayPrincipal = []; 
+  let arrayAnterior = [];
+  
+  if (tipo === 'hoy') { 
+    const dia = document.getElementById("filtro-stat-dia").value; 
+    arrayPrincipal = visitas.filter(v => v.fechaISO === dia); 
+    let d = new Date(dia); 
+    d.setDate(d.getDate() - 1); 
+    arrayAnterior = visitas.filter(v => v.fechaISO === d.toISOString().split('T')[0]); 
+  } 
+  else if (tipo === 'mes') { 
+    const mesVal = document.getElementById("filtro-stat-mes").value; 
+    arrayPrincipal = visitas.filter(v => v.fechaISO.startsWith(mesVal)); 
+    let d = new Date(mesVal + "-01"); 
+    d.setMonth(d.getMonth() - 1); 
+    arrayAnterior = visitas.filter(v => v.fechaISO.startsWith(d.toISOString().substring(0, 7))); 
+  }
+  else if (tipo === 'rango') { 
+    const ini = document.getElementById("filtro-stat-inicio").value; 
+    const fin = document.getElementById("filtro-stat-fin").value; 
+    arrayPrincipal = visitas.filter(v => v.fechaISO >= ini && v.fechaISO <= fin); 
+  }
+  else if (tipo === 'ytd') { 
+    const anio = new Date().getFullYear().toString(); 
+    arrayPrincipal = visitas.filter(v => v.fechaISO.startsWith(anio)); 
+    arrayAnterior = visitas.filter(v => v.fechaISO.startsWith((new Date().getFullYear() - 1).toString())); 
+  } 
+  return { principal: arrayPrincipal, anterior: arrayAnterior };
+}
+
+function calcularTasa(array) { 
+  if(array.length === 0) return { tacticas: 0 }; 
+  let tVisitas = 0, cVisitas = 0; 
+  array.forEach(v => { 
+    if(v.evaluacionVisita) {
+      v.evaluacionVisita.forEach(e => { tVisitas++; if(e.cumple) cVisitas++; }); 
+    }
+  }); 
+  return { tacticas: tVisitas ? Math.round((cVisitas/tVisitas)*100) : 0 }; 
+}
+
+function mostrarTendencia(idElemento, valorActual, valorAnterior, mostrar) { 
+  const el = document.getElementById(idElemento); 
+  if (!mostrar || valorAnterior === 0) { el.innerHTML = ""; el.className = "trend-badge"; return; } 
+  
+  const dif = valorActual - valorAnterior; 
+  
+  if (dif > 0) { 
+    el.innerHTML = `<i class="fas fa-arrow-up"></i> +${dif}`; 
+    el.className = "trend-badge trend-up"; 
+  } else if (dif < 0) { 
+    el.innerHTML = `<i class="fas fa-arrow-down"></i> ${dif}`; 
+    el.className = "trend-badge trend-down"; 
+  } else { 
+    el.innerHTML = `<i class="fas fa-minus"></i> 0`; 
+    el.className = "trend-badge trend-neutral"; 
+  } 
+}
+
+function actualizarEstadisticas() {
+  const datos = obtenerDatosFiltrados(); 
+  const vMain = datos.principal; 
+  const vPrev = datos.anterior; 
+  const tipoFiltro = document.getElementById("tipo-filtro-stats").value; 
+  const muestraTendencia = (tipoFiltro === 'mes' || tipoFiltro === 'hoy' || tipoFiltro === 'ytd');
+  
+  document.getElementById("btn-reporte-gerencia").disabled = false; 
+  document.getElementById("btn-reporte-gerencia").innerHTML = '<i class="fas fa-magic"></i> Generar Resumen con IA'; 
+  document.getElementById("box-reporte-gerencia").style.display = 'none';
+  if (document.getElementById("box-informe-operativo")) document.getElementById("box-informe-operativo").style.display = 'none';
+  
+  document.getElementById("kpi-tiendas").innerText = vMain.length; 
+  mostrarTendencia("trend-tiendas", vMain.length, vPrev.length, muestraTendencia); 
+  
+  const tasaActual = calcularTasa(vMain).tacticas; 
+  const tasaAnterior = calcularTasa(vPrev).tacticas; 
+  document.getElementById("kpi-tacticas").innerText = tasaActual + "%"; 
+  mostrarTendencia("trend-tacticas", tasaActual, tasaAnterior, muestraTendencia);
+  
+  // KPI adicional Genomma impactos
+  const totalImpGenomma = vMain.filter(v => v.comproPorGenomma).length;
+  const prevImpGenomma = vPrev.filter(v => v.comproPorGenomma).length;
+  const elKpiGenomma = document.getElementById("kpi-genomma-imp");
+  if (elKpiGenomma) { elKpiGenomma.innerText = totalImpGenomma; }
+  const trendGenommaEl = document.getElementById("trend-genomma-imp");
+  if (trendGenommaEl) mostrarTendencia("trend-genomma-imp", totalImpGenomma, prevImpGenomma, muestraTendencia);
+  
+  // KPI Duracell impactos
+  const totalImpDuracell = vMain.filter(v => v.comproPorDuracell).length;
+  const prevImpDuracell = vPrev.filter(v => v.comproPorDuracell).length;
+  const elKpiDuracell = document.getElementById("kpi-duracell-imp");
+  if (elKpiDuracell) { elKpiDuracell.innerText = totalImpDuracell; }
+  if (document.getElementById("trend-duracell-imp")) mostrarTendencia("trend-duracell-imp", totalImpDuracell, prevImpDuracell, muestraTendencia);
+
+  let dataMarcas = []; 
+  let labelsMarcas = []; 
+  
+  marcas.forEach(m => { 
+    // marcas es ahora un array de strings
+    const nombreMarca = (typeof m === 'object') ? m.nombre : m;
+    let count = 0, evaluadas = 0; 
+    vMain.forEach(v => { 
+      const r = v.resultados.find(x => x.marca === nombreMarca); 
+      if(r) { evaluadas++; if(r.disponible) count++; } 
+    }); 
+    if(evaluadas > 0){ 
+      labelsMarcas.push(nombreMarca); 
+      dataMarcas.push(Math.round((count / evaluadas) * 100)); 
+    }
+  });
+  
+  const lblsTacticas = ["Saludo", "Soluciones", "Reconoce Marcas", "Apertura", "Despedida"]; 
+  let dataTacticas = []; 
+  
+  aspectosVisita.forEach(aspecto => { 
+    let count = 0; 
+    vMain.forEach(v => { 
+      if(v.evaluacionVisita) { 
+        const c = v.evaluacionVisita.find(x => x.aspecto === aspecto); 
+        if(c && c.cumple) count++; 
+      } 
+    }); 
+    dataTacticas.push(vMain.length ? Math.round((count / vMain.length) * 100) : 0); 
+  });
+  
+  let vendedoresUnicos = []; 
+  let vPrimeras = []; 
+  
+  vMain.forEach(v => { 
+    if(!vendedoresUnicos.includes(v.vendedor)) { 
+      vendedoresUnicos.push(v.vendedor); 
+      vPrimeras.push(v); 
+    } 
+  }); 
+  
+  let dataDiaria = []; 
+  aspectosDiarios.forEach(aspecto => { 
+    let count = 0; 
+    vPrimeras.forEach(v => { 
+      if(v.evaluacionDiaria) { 
+        const c = v.evaluacionDiaria.find(x => x.aspecto === aspecto); 
+        if(c && c.cumple) count++; 
+      } 
+    }); 
+    dataDiaria.push(vPrimeras.length ? Math.round((count / vPrimeras.length) * 100) : 0); 
+  });
+
+  let clsHtml = `<p><strong>Periodo analizado:</strong> ${vMain.length} tiendas</p>`;
+  
+  // Datos de impactos de compra
+  const impGenommaTotal = vMain.filter(v => v.comproPorGenomma).length;
+  const impDuracellTotal = vMain.filter(v => v.comproPorDuracell).length;
+  clsHtml += `<div style="background:#e8f0fe; border-radius:8px; padding:10px; margin:10px 0;">
+    <b style="color:var(--primary);"><i class="fas fa-shopping-cart"></i> Impactos de Compra:</b>
+    <div style="display:flex; gap:10px; margin-top:5px;">
+      <span style="background:white; padding:5px 10px; border-radius:20px; font-size:0.85rem;"><i class="fas fa-pills" style="color:var(--primary);"></i> Genomma: <b>${impGenommaTotal}</b></span>
+      <span style="background:white; padding:5px 10px; border-radius:20px; font-size:0.85rem;"><i class="fas fa-battery-full" style="color:#1D6F42;"></i> Duracell: <b>${impDuracellTotal}</b></span>
+    </div>
+  </div>`;
+  
+  clsHtml += `<h4 style="margin:15px 0 10px; color:var(--primary);">Marcas Genomma Lab:</h4>`; 
+  labelsMarcas.forEach((m, i) => { clsHtml += generarBarra(m, dataMarcas[i], 'var(--primary)'); }); 
+  
+  clsHtml += `<h4 style="margin:20px 0 10px; color:var(--primary);">Presentación Diaria (${vendedoresUnicos.length} Vendedores):</h4>`; 
+  aspectosDiarios.forEach((a, i) => { clsHtml += generarBarra(a, dataDiaria[i], 'var(--primary)'); }); 
+  
+  clsHtml += `<h4 style="margin:20px 0 10px; color:var(--eval);">Tácticas (Guion de Visita):</h4>`; 
+  aspectosVisita.forEach((a, i) => { clsHtml += generarBarra(a, dataTacticas[i], 'var(--eval)'); }); 
+  
+  document.getElementById("stats-container").innerHTML = clsHtml;
+  
+  if (charInstanciaMarcas) charInstanciaMarcas.destroy(); 
+  if (charInstanciaTacticas) charInstanciaTacticas.destroy(); 
+  if (charInstanciaDiaria) charInstanciaDiaria.destroy();
+  
+  charInstanciaMarcas = new Chart(document.getElementById('chartMarcas').getContext('2d'), { 
+    type: 'bar', 
+    data: { labels: labelsMarcas, datasets:[{ label: '% Presencia', data: dataMarcas, backgroundColor: '#0066cc', borderRadius: 4 }] }, 
+    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, scales: { x: { max: 100 } }, plugins: { legend: { display: false } } } 
+  });
+  
+  charInstanciaTacticas = new Chart(document.getElementById('chartTacticas').getContext('2d'), { 
+    type: 'radar', 
+    data: { labels: lblsTacticas, datasets:[{ label: '% Cumplimiento', data: dataTacticas, backgroundColor: 'rgba(230, 126, 34, 0.2)', borderColor: '#e67e22', pointBackgroundColor: '#e67e22', }] }, 
+    options: { responsive: true, maintainAspectRatio: false, scales: { r: { max: 100, min: 0, ticks: { display: false } } }, plugins: { legend: { display: false } } } 
+  });
+  
+  charInstanciaDiaria = new Chart(document.getElementById('chartDiaria').getContext('2d'), { 
+    type: 'doughnut', 
+    data: { labels: ["Uniforme", "Herramientas"], datasets: [{ data: dataDiaria, backgroundColor:['#28a745', '#17a2b8'], hoverOffset: 4 }] }, 
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } } } 
+  });
+}
+
+function generarBarra(etiqueta, porcentaje, color) { 
+  return `<div style="margin-bottom:10px;"><div style="display:flex; justify-content:space-between; font-size:0.85rem;"><span>${etiqueta}</span><strong>${porcentaje}%</strong></div><div style="width:100%; background:#e0e0e0; border-radius:5px; height:8px;"><div style="width:${porcentaje}%; background:${color}; height:100%; border-radius:5px;"></div></div></div>`; 
+}
+
+// ==========================================
+// 17. HUB DE DISTRIBUIDORES
+// ==========================================
+function inicializarHubDistrib() {
+  const sel = document.getElementById('distrib-select');
+  if (!sel) return;
+  let opts = '';
+  distribuidores.forEach(d => { opts += `<option value="${d.nombre}">${d.nombre}</option>`; });
+  sel.innerHTML = opts;
+  renderizarHubDistrib();
+}
+
+function cambiarTabDistrib(tab) {
+  ['stats','tareas','cuotas','incentivo'].forEach(t => {
+    document.getElementById(`tab-distrib-${t}`)?.classList.remove('active');
+    const panel = document.getElementById(`panel-distrib-${t}`);
+    if (panel) panel.style.display = 'none';
+  });
+  document.getElementById(`tab-distrib-${tab}`)?.classList.add('active');
+  const panel = document.getElementById(`panel-distrib-${tab}`);
+  if (panel) panel.style.display = 'block';
+  renderizarHubDistrib();
+}
+
+function cambiarPeriodoDistrib(periodo) {
+  _periodoDistrib = periodo;
+  ['semana','mes','anio'].forEach(p => {
+    document.getElementById(`tab-ds-${p}`)?.classList.remove('active');
+  });
+  document.getElementById(`tab-ds-${periodo}`)?.classList.add('active');
+  renderizarStatsDistrib();
+}
+
+function renderizarHubDistrib() {
+  const tab = document.querySelector('#panel-distrib-stats')?.style.display !== 'none' ? 'stats'
+    : document.querySelector('#panel-distrib-tareas')?.style.display !== 'none' ? 'tareas'
+    : document.querySelector('#panel-distrib-cuotas')?.style.display !== 'none' ? 'cuotas'
+    : 'incentivo';
+
+  if (tab === 'stats') renderizarStatsDistrib();
+  else if (tab === 'tareas') renderizarTareasDistrib();
+  else if (tab === 'cuotas') renderizarCuotasDistrib();
+  else if (tab === 'incentivo') renderizarIncentivosDistrib();
+}
+
+function getDistribSeleccionado() {
+  return document.getElementById('distrib-select')?.value || '';
+}
+
+function getFiltroFechasDistrib() {
+  const hoy = new Date();
+  const hoyStr = getHoy();
+  if (_periodoDistrib === 'semana') {
+    const lunesOffset = hoy.getDay() === 0 ? -6 : 1 - hoy.getDay();
+    const lunes = new Date(hoy); lunes.setDate(hoy.getDate() + lunesOffset);
+    const lunStr = lunes.toISOString().split('T')[0];
+    return v => v.fechaISO >= lunStr && v.fechaISO <= hoyStr;
+  } else if (_periodoDistrib === 'mes') {
+    const mes = hoyStr.substring(0, 7);
+    return v => v.fechaISO.startsWith(mes);
+  } else {
+    const anio = hoyStr.substring(0, 4);
+    return v => v.fechaISO.startsWith(anio);
+  }
+}
+
+function renderizarStatsDistrib() {
+  const nombre = getDistribSeleccionado();
+  if (!nombre) return;
+  const filtroFecha = getFiltroFechasDistrib();
+  const visitasDistrib = visitas.filter(v => v.distribuidor === nombre && filtroFecha(v));
+  
+  const container = document.getElementById('distrib-stats-content');
+  if (!container) return;
+
+  if (visitasDistrib.length === 0) {
+    container.innerHTML = `<div class="card" style="text-align:center; color:#888; padding:30px;">
+      <i class="fas fa-chart-bar" style="font-size:2rem; opacity:0.3; margin-bottom:10px;"></i>
+      <p>Sin acompañamientos registrados en este período</p></div>`;
+    return;
+  }
+
+  // Agrupar por sesión (fecha + vendedor)
+  const sesiones = {};
+  visitasDistrib.forEach(v => {
+    const k = `${v.fechaISO}|${v.vendedor}`;
+    if (!sesiones[k]) sesiones[k] = [];
+    sesiones[k].push(v);
+  });
+  const numAcomp = Object.keys(sesiones).length;
+  const vendedoresUnicos = [...new Set(visitasDistrib.map(v => v.vendedor))];
+  const tiendas = visitasDistrib.length;
+
+  let impGenomma = 0, impDuracell = 0, valGenomma = 0, valDuracell = 0;
+  Object.keys(sesiones).forEach(k => {
+    const parts = k.split('|');
+    const fecha = parts[0], vendedor = parts[1];
+    const claveEdit = `${fecha}|${nombre}|${vendedor}`;
+    const edit = datosHistorialEdit[claveEdit] || {};
+    const grupo = sesiones[k];
+    impGenomma += edit.impactosGenomma !== undefined ? edit.impactosGenomma : grupo.filter(v=>v.comproPorGenomma).length;
+    impDuracell += edit.impactosDuracell !== undefined ? edit.impactosDuracell : grupo.filter(v=>v.comproPorDuracell).length;
+    valGenomma += parseFloat(edit.valorGenomma || 0);
+    valDuracell += parseFloat(edit.valorDuracell || 0);
+  });
+
+  // Presencia por marca
+  let marcaData = {};
+  visitasDistrib.forEach(v => {
+    if (v.resultados) v.resultados.forEach(r => {
+      if (!marcaData[r.marca]) marcaData[r.marca] = {t:0,c:0};
+      marcaData[r.marca].t++;
+      if (r.disponible) marcaData[r.marca].c++;
+    });
+  });
+
+  // Tácticas
+  let tTac = 0, cTac = 0;
+  visitasDistrib.forEach(v => {
+    if (v.evaluacionVisita) v.evaluacionVisita.forEach(e => { tTac++; if(e.cumple) cTac++; });
+  });
+  const pctTac = tTac ? Math.round((cTac/tTac)*100) : 0;
+
+  const distriObj = distribuidores.find(d => d.nombre === nombre);
+  const vendeDuracell = distriObj?.marcasAsignadas?.includes('Duracell');
+  
+  const labelPeriodo = _periodoDistrib === 'semana' ? 'esta semana' : _periodoDistrib === 'mes' ? 'este mes' : 'este año';
+
+  let html = `
+    <div class="card" style="background:linear-gradient(135deg,#0066cc,#004499); color:white; border-radius:12px; padding:15px; margin-bottom:10px;">
+      <h4 style="margin:0 0 5px; opacity:0.8; font-size:0.85rem; font-weight:normal;"><i class="fas fa-truck"></i> ${nombre} — ${labelPeriodo}</h4>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:10px;">
+        <div style="text-align:center; background:rgba(255,255,255,0.15); border-radius:8px; padding:8px;">
+          <div style="font-size:1.5rem; font-weight:bold;">${numAcomp}</div>
+          <div style="font-size:0.65rem; opacity:0.8;">Acompañamientos</div>
+        </div>
+        <div style="text-align:center; background:rgba(255,255,255,0.15); border-radius:8px; padding:8px;">
+          <div style="font-size:1.5rem; font-weight:bold;">${vendedoresUnicos.length}</div>
+          <div style="font-size:0.65rem; opacity:0.8;">Vendedores</div>
+        </div>
+        <div style="text-align:center; background:rgba(255,255,255,0.15); border-radius:8px; padding:8px;">
+          <div style="font-size:1.5rem; font-weight:bold;">${tiendas}</div>
+          <div style="font-size:0.65rem; opacity:0.8;">Tiendas</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
+      <div class="kpi-card" style="border-left-color:var(--primary);">
+        <i class="fas fa-pills kpi-icon" style="color:var(--primary);"></i>
+        <div class="kpi-num" style="font-size:1.3rem;">${impGenomma}</div>
+        <div class="kpi-label">Impactos Genomma</div>
+        <div style="font-size:0.75rem; color:var(--success); font-weight:bold; margin-top:3px;">$${Number(valGenomma).toLocaleString('es-CO')}</div>
+      </div>
+      ${vendeDuracell ? `<div class="kpi-card" style="border-left-color:#1D6F42;">
+        <i class="fas fa-battery-full kpi-icon" style="color:#1D6F42;"></i>
+        <div class="kpi-num" style="font-size:1.3rem;">${impDuracell}</div>
+        <div class="kpi-label">Impactos Duracell</div>
+        <div style="font-size:0.75rem; color:#1D6F42; font-weight:bold; margin-top:3px;">$${Number(valDuracell).toLocaleString('es-CO')}</div>
+      </div>` : `<div class="kpi-card" style="border-left-color:var(--eval);">
+        <i class="fas fa-bullseye kpi-icon" style="color:var(--eval);"></i>
+        <div class="kpi-num" style="font-size:1.3rem;">${pctTac}%</div>
+        <div class="kpi-label">Efectividad Tácticas</div>
+      </div>`}
+    </div>
+
+    <div class="card">
+      <h5 style="color:var(--primary); margin-bottom:10px;"><i class="fas fa-tags"></i> Presencia por Marca</h5>
+      ${Object.keys(marcaData).map(m => {
+        const pct = marcaData[m].t ? Math.round((marcaData[m].c/marcaData[m].t)*100) : 0;
+        const color = pct >= 70 ? '#28a745' : pct >= 40 ? '#e67e22' : '#dc3545';
+        return `<div style="margin-bottom:8px;">
+          <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:3px;">
+            <span>${m}</span><strong style="color:${color};">${pct}%</strong>
+          </div>
+          <div style="background:#e0e0e0; border-radius:4px; height:6px;">
+            <div style="width:${pct}%; background:${color}; height:100%; border-radius:4px; transition:0.3s;"></div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div class="card">
+      <h5 style="color:var(--primary); margin-bottom:10px;"><i class="fas fa-calendar-alt"></i> Últimos Acompañamientos</h5>
+      ${Object.keys(sesiones).sort().reverse().slice(0,5).map(k => {
+        const [fecha, vendedor] = k.split('|');
+        const claveEdit = `${fecha}|${nombre}|${vendedor}`;
+        const edit = datosHistorialEdit[claveEdit] || {};
+        const grupo = sesiones[k];
+        const imp = (edit.impactosGenomma || grupo.filter(v=>v.comproPorGenomma).length);
+        return `<div class="ficha-stat">
+          <span><i class="fas fa-user-tie" style="color:var(--primary); margin-right:5px;"></i>${vendedor}</span>
+          <span style="font-size:0.75rem; color:#888;">${fecha} · ${grupo.length} tiendas · ${imp} imp.</span>
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  container.innerHTML = html;
+}
+
+// ─── TAREAS ───────────────────────────────────────────────
+function abrirModalTarea() {
+  const modal = document.getElementById('modal-tarea');
+  if (modal) {
+    document.getElementById('tarea-descripcion').value = '';
+    document.getElementById('tarea-fecha').value = getHoy();
+    modal.style.display = 'flex';
+  }
+}
+
+function guardarTareaDistrib() {
+  const nombre = getDistribSeleccionado();
+  const desc = document.getElementById('tarea-descripcion')?.value.trim();
+  const cat = document.getElementById('tarea-categoria')?.value;
+  const fecha = document.getElementById('tarea-fecha')?.value;
+  if (!desc) return alert('La descripción es obligatoria');
+  
+  if (!tareasDistrib[nombre]) tareasDistrib[nombre] = [];
+  tareasDistrib[nombre].push({ id: Date.now(), descripcion: desc, categoria: cat, fecha, hecha: false, creada: getHoy() });
+  localStorage.setItem('tareasDistrib', JSON.stringify(tareasDistrib));
+  document.getElementById('modal-tarea').style.display = 'none';
+  renderizarTareasDistrib();
+  showToast('Tarea agregada');
+}
+
+function toggleTareaDistrib(nombre, id) {
+  if (!tareasDistrib[nombre]) return;
+  const t = tareasDistrib[nombre].find(t => t.id === id);
+  if (t) t.hecha = !t.hecha;
+  localStorage.setItem('tareasDistrib', JSON.stringify(tareasDistrib));
+  renderizarTareasDistrib();
+}
+
+function eliminarTareaDistrib(nombre, id) {
+  if (!tareasDistrib[nombre]) return;
+  tareasDistrib[nombre] = tareasDistrib[nombre].filter(t => t.id !== id);
+  localStorage.setItem('tareasDistrib', JSON.stringify(tareasDistrib));
+  renderizarTareasDistrib();
+}
+
+function renderizarTareasDistrib() {
+  const nombre = getDistribSeleccionado();
+  const container = document.getElementById('lista-tareas-distrib');
+  if (!container) return;
+  
+  const tareas = tareasDistrib[nombre] || [];
+  if (tareas.length === 0) {
+    container.innerHTML = '<p style="color:#888; text-align:center; padding:20px;">Sin tareas. ¡Agrega la primera!</p>';
+    return;
+  }
+  
+  const catColors = { seguimiento: '#0066cc', incentivo: '#e67e22', capacitacion: '#17a2b8', comercial: '#28a745', admin: '#6c757d' };
+  const catIcons = { seguimiento: 'fa-eye', incentivo: 'fa-trophy', capacitacion: 'fa-graduation-cap', comercial: 'fa-handshake', admin: 'fa-file-alt' };
+  
+  // Ordenar: pendientes primero, luego por fecha
+  const ordenadas = [...tareas].sort((a,b) => (a.hecha - b.hecha) || (a.fecha > b.fecha ? 1 : -1));
+  
+  const pendientes = ordenadas.filter(t => !t.hecha).length;
+  const hechas = ordenadas.filter(t => t.hecha).length;
+  
+  let html = `<div style="display:flex; gap:8px; margin-bottom:10px; font-size:0.8rem;">
+    <span style="background:#fff3cd; color:#856404; padding:3px 10px; border-radius:10px; font-weight:bold;">⏳ ${pendientes} pendientes</span>
+    <span style="background:#d4edda; color:#155724; padding:3px 10px; border-radius:10px; font-weight:bold;">✅ ${hechas} hechas</span>
+  </div>`;
+  
+  ordenadas.forEach(t => {
+    const color = catColors[t.categoria] || '#666';
+    const icon = catIcons[t.categoria] || 'fa-check';
+    const vencida = !t.hecha && t.fecha < getHoy();
+    html += `
+      <div style="display:flex; align-items:flex-start; gap:10px; padding:10px; background:${t.hecha ? '#f8f9fa' : 'white'}; border-radius:8px; margin-bottom:6px; border-left:3px solid ${t.hecha ? '#ccc' : color}; ${vencida ? 'box-shadow:0 0 0 1px #dc3545;':''} opacity:${t.hecha?'0.7':'1'};">
+        <input type="checkbox" ${t.hecha ? 'checked' : ''} onchange="toggleTareaDistrib('${nombre}', ${t.id})" style="margin-top:3px; width:18px; height:18px; accent-color:${color}; flex-shrink:0; cursor:pointer;">
+        <div style="flex:1;">
+          <div style="font-size:0.88rem; ${t.hecha ? 'text-decoration:line-through; color:#999;' : 'color:#333;'} font-weight:bold;">${t.descripcion}</div>
+          <div style="display:flex; gap:6px; margin-top:4px; align-items:center;">
+            <span style="background:${color}; color:white; padding:1px 7px; border-radius:8px; font-size:0.65rem;"><i class="fas ${icon}"></i> ${t.categoria}</span>
+            <span style="font-size:0.7rem; color:${vencida?'#dc3545':'#888'};">${vencida?'⚠️ ':''}${t.fecha}</span>
+          </div>
+        </div>
+        <button onclick="eliminarTareaDistrib('${nombre}', ${t.id})" style="background:none; border:none; color:#ccc; cursor:pointer; font-size:1rem; padding:0;"><i class="fas fa-times"></i></button>
+      </div>`;
+  });
+  
+  container.innerHTML = html;
+}
+
+// ─── CUOTAS ───────────────────────────────────────────────
+function guardarCuotaDistrib() {
+  const nombre = getDistribSeleccionado();
+  const mes = document.getElementById('cuota-mes')?.value;
+  const genomma = document.getElementById('cuota-genomma')?.value;
+  const duracell = document.getElementById('cuota-duracell')?.value;
+  const tiendas = document.getElementById('cuota-tiendas')?.value;
+  if (!mes) return alert('Selecciona el mes');
+  
+  if (!cuotasDistrib[nombre]) cuotasDistrib[nombre] = [];
+  // Reemplazar si ya existe para ese mes
+  cuotasDistrib[nombre] = cuotasDistrib[nombre].filter(c => c.mes !== mes);
+  cuotasDistrib[nombre].push({ mes, genomma: Number(genomma)||0, duracell: Number(duracell)||0, tiendas: Number(tiendas)||0, guardada: getHoy() });
+  localStorage.setItem('cuotasDistrib', JSON.stringify(cuotasDistrib));
+  renderizarCuotasDistrib();
+  showToast('Cuota guardada');
+}
+
+function compartirCuotaWA() {
+  const nombre = getDistribSeleccionado();
+  const mes = document.getElementById('cuota-mes')?.value;
+  const genomma = document.getElementById('cuota-genomma')?.value || 0;
+  const duracell = document.getElementById('cuota-duracell')?.value || 0;
+  const tiendas = document.getElementById('cuota-tiendas')?.value || 0;
+  const total = Number(genomma) + Number(duracell);
+  
+  const texto = `📊 *Cuotas ${mes} - Genomma Lab*\n\n🏢 Distribuidor: ${nombre}\n\n💊 *Genomma Lab*\nCuota: $${Number(genomma).toLocaleString('es-CO')}\n\n🔋 *Duracell*\nCuota: $${Number(duracell).toLocaleString('es-CO')}\n\n🏪 Tiendas objetivo: ${tiendas}\n\n💰 *Total cuota: $${total.toLocaleString('es-CO')}*\n\n¡Juntos lo logramos! 💪 - Cesar Pescador, Genomma Lab`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank');
+}
+
+function renderizarCuotasDistrib() {
+  const nombre = getDistribSeleccionado();
+  const container = document.getElementById('historial-cuotas-distrib');
+  if (!container) return;
+  
+  const cuotas = (cuotasDistrib[nombre] || []).sort((a,b) => b.mes > a.mes ? 1 : -1);
+  if (cuotas.length === 0) { container.innerHTML = ''; return; }
+  
+  container.innerHTML = `<h5 style="color:var(--primary); margin:0 0 8px;"><i class="fas fa-history"></i> Cuotas Registradas</h5>` +
+    cuotas.map(c => `
+      <div class="ficha-stat" style="flex-direction:column; align-items:flex-start; gap:3px;">
+        <div style="display:flex; justify-content:space-between; width:100%;"><b>${c.mes}</b><span style="font-size:0.75rem; color:#888;">${c.guardada}</span></div>
+        <div style="font-size:0.8rem;">💊 Genomma: <b>$${Number(c.genomma).toLocaleString('es-CO')}</b> | 🔋 Duracell: <b>$${Number(c.duracell).toLocaleString('es-CO')}</b></div>
+        <div style="font-size:0.8rem;">🏪 Tiendas: <b>${c.tiendas}</b></div>
+      </div>`).join('');
+}
+
+// ─── INCENTIVOS ──────────────────────────────────────────
+function guardarIncentivoDistrib() {
+  const nombre = getDistribSeleccionado();
+  const mes = document.getElementById('incentivo-mes')?.value;
+  const ventaGenomma = document.getElementById('incentivo-venta-genomma')?.value;
+  const ventaDuracell = document.getElementById('incentivo-venta-duracell')?.value;
+  const incentivo = document.getElementById('incentivo-valor')?.value;
+  const obs = document.getElementById('incentivo-obs')?.value;
+  if (!mes) return alert('Selecciona el período');
+  
+  if (!incentivosDistrib[nombre]) incentivosDistrib[nombre] = [];
+  incentivosDistrib[nombre].push({ id: Date.now(), mes, ventaGenomma: Number(ventaGenomma)||0, ventaDuracell: Number(ventaDuracell)||0, incentivo: Number(incentivo)||0, obs, guardado: getHoy() });
+  localStorage.setItem('incentivosDistrib', JSON.stringify(incentivosDistrib));
+  renderizarIncentivosDistrib();
+  showToast('Incentivo guardado');
+}
+
+function compartirIncentivoWA() {
+  const nombre = getDistribSeleccionado();
+  const mes = document.getElementById('incentivo-mes')?.value;
+  const ventaGenomma = document.getElementById('incentivo-venta-genomma')?.value || 0;
+  const ventaDuracell = document.getElementById('incentivo-venta-duracell')?.value || 0;
+  const incentivo = document.getElementById('incentivo-valor')?.value || 0;
+  const obs = document.getElementById('incentivo-obs')?.value || '';
+  const totalVenta = Number(ventaGenomma) + Number(ventaDuracell);
+  
+  const texto = `🏆 *Informe de Incentivos ${mes} - Genomma Lab*\n\n🏢 Distribuidor: ${nombre}\n\n💊 Ventas Genomma: $${Number(ventaGenomma).toLocaleString('es-CO')}\n🔋 Ventas Duracell: $${Number(ventaDuracell).toLocaleString('es-CO')}\n💰 *Total Ventas: $${totalVenta.toLocaleString('es-CO')}*\n\n🎁 *Incentivo Ganado: $${Number(incentivo).toLocaleString('es-CO')}*\n\n📝 ${obs}\n\n¡Felicitaciones por el excelente trabajo! 🚀\n- Cesar Pescador, Genomma Lab`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank');
+}
+
+function renderizarIncentivosDistrib() {
+  const nombre = getDistribSeleccionado();
+  const container = document.getElementById('historial-incentivos-distrib');
+  if (!container) return;
+  
+  const incentivos = (incentivosDistrib[nombre] || []).sort((a,b) => b.id - a.id);
+  if (incentivos.length === 0) { container.innerHTML = ''; return; }
+  
+  container.innerHTML = `<h5 style="color:var(--primary); margin:0 0 8px;"><i class="fas fa-history"></i> Historial de Incentivos</h5>` +
+    incentivos.map(inc => `
+      <div class="registro-card" style="margin-bottom:8px;">
+        <div style="font-weight:bold; color:var(--primary);">${inc.mes}</div>
+        <div style="font-size:0.82rem; margin-top:4px;">💊 Genomma: <b>$${Number(inc.ventaGenomma).toLocaleString('es-CO')}</b></div>
+        <div style="font-size:0.82rem;">🔋 Duracell: <b>$${Number(inc.ventaDuracell).toLocaleString('es-CO')}</b></div>
+        <div style="font-size:0.82rem; color:var(--success); font-weight:bold;">🎁 Incentivo: $${Number(inc.incentivo).toLocaleString('es-CO')}</div>
+        ${inc.obs ? `<div style="font-size:0.78rem; color:#666; margin-top:4px; font-style:italic;">${inc.obs}</div>` : ''}
+        <button class="btn-primary" style="margin-top:8px; padding:5px 10px; width:auto; font-size:0.78rem; background:#25D366;" onclick="compartirIncentivoHistorial(${inc.id},'${nombre}')">
+          <i class="fab fa-whatsapp"></i> Compartir
+        </button>
+      </div>`).join('');
+}
+
+function compartirIncentivoHistorial(id, nombre) {
+  const lista = incentivosDistrib[nombre] || [];
+  const inc = lista.find(i => i.id === id);
+  if (!inc) return;
+  const totalVenta = Number(inc.ventaGenomma) + Number(inc.ventaDuracell);
+  const texto = `🏆 *Informe de Incentivos ${inc.mes} - Genomma Lab*\n\n🏢 Distribuidor: ${nombre}\n\n💊 Ventas Genomma: $${Number(inc.ventaGenomma).toLocaleString('es-CO')}\n🔋 Ventas Duracell: $${Number(inc.ventaDuracell).toLocaleString('es-CO')}\n💰 *Total Ventas: $${totalVenta.toLocaleString('es-CO')}*\n\n🎁 *Incentivo Ganado: $${Number(inc.incentivo).toLocaleString('es-CO')}*\n\n📝 ${inc.obs}\n\n- Cesar Pescador, Genomma Lab`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank');
+}
+
+// ==========================================
+// 18. INICIAR LA APLICACIÓN
+// ==========================================
+renderizarApp();
